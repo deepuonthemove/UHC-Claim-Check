@@ -1,0 +1,44 @@
+{
+  "name": "uhc-tmp",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "test": "jest",
+    "test:coverage": "jest --coverage",
+    "test:watch": "jest --watch",
+    "totp": "node scripts/totp.js",
+    "totp:watch": "node scripts/totp.js --watch",
+    "totp:range": "node scripts/totp.js --range",
+    "totp:tight": "node scripts/totp.js --tight"
+  },
+  "dependencies": {
+    "@microsoft/fetch-event-source": "^2.0.1",
+    "@sparticuz/chromium": "^148.0.0",
+    "exceljs": "^4.4.0",
+    "next": "16.2.9",
+    "otplib": "^13.4.1",
+    "playwright-core": "^1.61.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.19.43",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.9",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0",
+    "ts-jest": "^29.4.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5"
+  }
+}
