@@ -97,6 +97,7 @@ export default function HomePage() {
   const worksheet  = useRef<ExcelJS.Worksheet | null>(null);
   const headerMap  = useRef<Map<string, number>>(new Map());
   const claimRows  = useRef<ClaimRow[]>([]);
+  const consecutiveRetries = useRef(0);
 
   // Auto-scroll logs
   useEffect(() => {
@@ -278,6 +279,7 @@ export default function HomePage() {
 
             } else if (event.type === 'done') {
               completedSuccessfully = true;
+              consecutiveRetries.current = 0; // Reset retries on successful batch completion
               ctrl.abort(); // Done processing, close SSE stream cleanly
             }
           } catch (parseErr) {
@@ -335,9 +337,20 @@ export default function HomePage() {
       }
     }
 
-    // Auto-resume or post-process
+    // Auto-resume, retry, or post-process
     if (chunkHasError) {
-      setIsProcessing(false);
+      if (consecutiveRetries.current < 3) {
+        consecutiveRetries.current += 1;
+        const retryDelay = 3000;
+        setStatus(`⚠️ Failure occurred. Retrying automatically in 3s (attempt ${consecutiveRetries.current}/3) from row ${currentCompleted + 1}...`);
+        setLogs(prev => [...prev, `⚠️ Failure occurred. Retrying automatically in 3s (attempt ${consecutiveRetries.current}/3) from row ${currentCompleted + 1}...`]);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        await processChunk(currentCompleted, totalRows);
+      } else {
+        setStatus(`❌ Process failed after 3 automatic retries at row ${currentCompleted + 1}.`);
+        setLogs(prev => [...prev, `❌ Auto-retry limit (3 attempts) reached. Stopping automation.`]);
+        setIsProcessing(false);
+      }
       return;
     }
 
@@ -371,6 +384,7 @@ export default function HomePage() {
     setLogs([]);
     setErrorScreenshots([]);
     setProgress(null);
+    consecutiveRetries.current = 0;
 
     try {
       // Ensure readwrite permission
@@ -474,7 +488,7 @@ export default function HomePage() {
             </div>
 
             {/* Step 3: Start */}
-            <div className="card">
+            <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <div className="card-label">Step 3 — Process</div>
               <button
                 type="submit"
@@ -482,8 +496,24 @@ export default function HomePage() {
                 disabled={!canSubmit}
                 className={`btn btn--primary btn--full ${!canSubmit ? 'btn--disabled' : ''}`}
               >
-                {isProcessing ? '⏳  Processing…' : '🚀  Start Processing'}
+                {isProcessing ? '⏳  Processing…' : progress && progress.completed > 0 ? '🚀  Start from Beginning' : '🚀  Start Processing'}
               </button>
+              
+              {!isProcessing && progress && progress.completed > 0 && progress.completed < progress.total && (
+                <button
+                  type="button"
+                  id="resume-btn"
+                  className="btn btn--secondary btn--full"
+                  onClick={async () => {
+                    setIsProcessing(true);
+                    consecutiveRetries.current = 0; // Reset retries on manual resume
+                    setStatus(`⏩ Resuming manually from row ${progress.completed + 1}...`);
+                    await processChunk(progress.completed, progress.total);
+                  }}
+                >
+                  ⏩ Resume from Row {progress.completed + 1}
+                </button>
+              )}
             </div>
 
             {/* Progress bar */}

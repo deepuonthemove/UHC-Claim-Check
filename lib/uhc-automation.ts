@@ -762,6 +762,7 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
 
   let browser: Browser | null = null;
   let context: BrowserContext | null = null;
+  let page: Page | null = null;
 
   try {
     if (wsEndpoint) {
@@ -796,7 +797,7 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
       userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     });
     await log(`✅ Browser context created.`);
-    const page = await context.newPage();
+    page = await context.newPage();
     page.setDefaultTimeout(30_000);
     await log(`✅ Browser page created.`);
 
@@ -856,6 +857,22 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
     await log(`\n✅ Batch finished. Processed ${processedInBatch} row(s) this batch.`);
     await sendEvent({ type: 'done', completed: startIndex, total: claims.length });
 
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await log(`❌ Automation run error: ${msg}`);
+
+    // Capture screenshot + HTML if page is still open
+    if (page && !page.isClosed()) {
+      try {
+        const ss = await page.screenshot({ type: 'jpeg', quality: 60 });
+        await sendEvent({ type: 'error_screenshot', index: -1, image: ss.toString('base64') });
+        const html = await page.evaluate(() => document.documentElement.outerHTML);
+        await sendEvent({ type: 'debug_html', index: -1, html });
+      } catch (diagErr) {
+        await log(`⚠️ Could not capture diagnostic logs on crash: ${diagErr}`);
+      }
+    }
+    throw err;
   } finally {
     await context?.close().catch(() => {});
     await browser?.close().catch(() => {});
