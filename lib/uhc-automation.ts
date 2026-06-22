@@ -259,21 +259,63 @@ async function login(
   await page.type(SEL.STEP1_USERNAME, username, { delay: 80 });
   await log(`  ✏️  Typed username: ${username}`);
 
-  try {
-    await clickWithRetry(
-      page,
-      SEL.STEP1_CONTINUE,
-      {
-        label:         'Continue (Step 1 — Sign In)',
-        maxAttempts:   3,
-        retryDelayMs:  2_000,
-        disappearsSel: SEL.STEP1_USERNAME,  // username field disappears when Step 2 loads
-      },
-      log
-    );
-    await log('  ✅ Step 1/3 complete (username submitted successfully).');
-  } catch {
-    await failWithDiagnostics('Step 1 failed: button#btnLogin could not be clicked after 3 attempts.');
+  const ERROR_SEL = '[data-cy="data-loginerrorsummary-error"], .error-msg';
+
+  let step1Success = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      // Wait for Akamai sensor to initialise before clicking Continue
+      if (attempt === 1) {
+        await log(`  ⏱️  Waiting 2 s for Akamai sensor to initialise before clicking Continue...`);
+        await page.waitForTimeout(2_000);
+      }
+
+      await page.click(SEL.STEP1_CONTINUE);
+      await log(`  🖱️  Clicked Continue (Step 1 — Sign In) (attempt ${attempt}/3).`);
+
+      // Wait up to 6 seconds to see if the page navigates OR shows an error
+      try {
+        await Promise.race([
+          page.locator(SEL.STEP1_USERNAME).waitFor({ state: 'detached', timeout: 6_000 }),
+          page.locator(ERROR_SEL).waitFor({ state: 'visible', timeout: 6_000 }),
+        ]);
+      } catch {
+        // timeout/race completed without throwing or one of them resolved
+      }
+
+      // Check if we succeeded (username field is gone/detached)
+      const usernameVisible = await page.locator(SEL.STEP1_USERNAME).isVisible().catch(() => false);
+      if (!usernameVisible) {
+        await log('  ✅ Step 1/3 complete (username submitted successfully).');
+        step1Success = true;
+        break;
+      }
+
+      // If username is still visible, check if there is an error message
+      const errorVisible = await page.locator(ERROR_SEL).isVisible().catch(() => false);
+      if (errorVisible) {
+        const errorText = await page.locator(ERROR_SEL).innerText().catch(() => '');
+        await log(`  ⚠️  Sign In reported error: "${errorText.trim()}".`);
+        
+        // Clear, re-type username and click again
+        await log('  🔄  Re-typing username and retrying submit...');
+        await page.click(SEL.STEP1_USERNAME);
+        await page.fill(SEL.STEP1_USERNAME, '');
+        await page.type(SEL.STEP1_USERNAME, username, { delay: 100 });
+        await page.waitForTimeout(2_000);
+      } else {
+        await log('  ⏳  Username field still visible (no explicit error). Retrying click...');
+        await page.waitForTimeout(2_000);
+      }
+
+    } catch (err) {
+      await log(`  ⚠️  Continue click failed (attempt ${attempt}): ${err}`);
+      await page.waitForTimeout(2_000);
+    }
+  }
+
+  if (!step1Success) {
+    await failWithDiagnostics('Step 1 failed: username was rejected or page did not load Step 2 after 3 attempts.');
   }
 
   // ══════════════════════════════════════════════════════════════════════════
