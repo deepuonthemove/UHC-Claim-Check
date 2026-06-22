@@ -245,10 +245,11 @@ async function login(
   // ══════════════════════════════════════════════════════════════════════════
   await log('  📋 Step 1/3 — Sign In: entering username...');
   try {
-    await page.waitForSelector(SEL.STEP1_USERNAME, { timeout: 15_000 });
+    // 45s timeout to allow AWS WAF challenge script to complete and redirect to the login form
+    await page.waitForSelector(SEL.STEP1_USERNAME, { timeout: 45_000 });
   } catch {
     await failWithDiagnostics(
-      'Step 1 failed: Sign In page did not load — input#username not found after 15s.'
+      'Step 1 failed: Sign In page did not load — input#username not found after 45s.'
     );
   }
 
@@ -281,10 +282,10 @@ async function login(
   // ══════════════════════════════════════════════════════════════════════════
   await log('  📋 Step 2/3 — Password page: entering password...');
   try {
-    await page.waitForSelector(SEL.STEP2_PASSWORD, { timeout: 20_000 });
+    await page.waitForSelector(SEL.STEP2_PASSWORD, { timeout: 30_000 });
   } catch {
     await failWithDiagnostics(
-      'Step 2 failed: Password page did not appear — input#login-pwd not found after 20s.'
+      'Step 2 failed: Password page did not appear — input#login-pwd not found after 30s.'
     );
   }
 
@@ -401,10 +402,10 @@ async function login(
   // ══════════════════════════════════════════════════════════════════════════
   await log('  📋 Step 3b — Authenticator Code page: generating TOTP...');
   try {
-    await page.waitForSelector(SEL.STEP3_CODE_INPUT, { timeout: 15_000 });
+    await page.waitForSelector(SEL.STEP3_CODE_INPUT, { timeout: 30_000 });
   } catch {
     await failWithDiagnostics(
-      'Step 3b failed: Authenticator Code page did not appear — input#totp not found after 15s.'
+      'Step 3b failed: Authenticator Code page did not appear — input#totp not found after 30s.'
     );
   }
 
