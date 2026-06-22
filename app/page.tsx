@@ -219,6 +219,7 @@ export default function HomePage() {
     const ctrl = new AbortController();
     let currentCompleted = startIndex;
     let chunkHasError    = false;
+    let completedSuccessfully = false;
 
     try {
       await fetchEventSource('/api/process', {
@@ -276,6 +277,7 @@ export default function HomePage() {
               ctrl.abort(); // Cancel the request and prevent auto-retry
 
             } else if (event.type === 'done') {
+              completedSuccessfully = true;
               ctrl.abort(); // Done processing, close SSE stream cleanly
             }
           } catch (parseErr) {
@@ -284,6 +286,12 @@ export default function HomePage() {
         },
 
         onclose() {
+          if (!completedSuccessfully && !chunkHasError) {
+            chunkHasError = true;
+            const msg = `❌ Connection closed unexpectedly by the server. This may indicate a Vercel timeout or server crash.`;
+            setLogs(prev => [...prev, msg]);
+            setStatus(msg);
+          }
           // If the connection was closed by the server, abort to prevent reconnect
           ctrl.abort();
         },
@@ -301,17 +309,29 @@ export default function HomePage() {
       // Wait for all queued writes to finish
       await writeQueue.current;
 
+      // Double check: if the promise resolved but we didn't receive 'done' or 'error' event,
+      // it means the stream ended abruptly without sending either.
+      if (!completedSuccessfully && !chunkHasError) {
+        chunkHasError = true;
+        const msg = `❌ Stream ended abruptly without a terminal 'done' or 'error' event from the server.`;
+        setLogs(prev => [...prev, msg]);
+        setStatus(msg);
+      }
+
     } catch (err) {
-      // If it was aborted cleanly (e.g. at done or expected error), don't log a scary message
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const isAbortError = 
+        errorMsg.toLowerCase().includes('abort') || 
+        errorMsg.includes('DOMException');
+
       if (ctrl.signal.aborted && !chunkHasError) {
         // Clean close
+      } else if (isAbortError) {
+        // Aborted due to tracked error, already logged, do nothing
       } else {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        if (errorMsg !== 'DOMException: The user aborted a request.' && errorMsg !== 'The user aborted a request.') {
-          console.error('fetchEventSource failed:', err);
-          setLogs(prev => [...prev, `❌ Connection error: ${errorMsg}`]);
-          chunkHasError = true;
-        }
+        console.error('fetchEventSource failed:', err);
+        setLogs(prev => [...prev, `❌ Connection error: ${errorMsg}`]);
+        chunkHasError = true;
       }
     }
 

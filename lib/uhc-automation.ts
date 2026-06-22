@@ -270,6 +270,7 @@ async function login(
       },
       log
     );
+    await log('  ✅ Step 1/3 complete (username submitted successfully).');
   } catch {
     await failWithDiagnostics('Step 1 failed: button#btnLogin could not be clicked after 3 attempts.');
   }
@@ -341,6 +342,7 @@ async function login(
           // Success = password field disappears (Step 3 has loaded)
           await page.locator(SEL.STEP2_PASSWORD).waitFor({ state: 'detached', timeout: retryDelayMs });
           await log('  ✔️  Continue (Step 2 — Password) click confirmed (password field detached).');
+          await log('  ✅ Step 2/3 complete (password submitted successfully).');
           step2Success = true;
           break;
         } catch {
@@ -386,6 +388,7 @@ async function login(
       },
       log
     );
+    await log('  ✅ Step 3a complete (Microsoft Authenticator selected).');
   } catch {
     await failWithDiagnostics(
       'Step 3a failed: button#totp could not be clicked after 3 attempts.'
@@ -431,6 +434,7 @@ async function login(
       },
       log
     );
+    await log('  ✅ Step 3b complete (TOTP submitted successfully).');
   } catch {
     await failWithDiagnostics('Step 3b failed: button#btnVerify could not be clicked after 3 attempts.');
   }
@@ -701,6 +705,19 @@ async function processRow(
       await log(`  ⚠️  Could not capture error diagnostics: ${diagErr}`);
     }
 
+    // If browser, context, or page is closed/destroyed, it's a terminal error
+    const isTerminal = 
+      msg.includes('closed') || 
+      msg.includes('Protocol error') || 
+      msg.includes('browser has been closed') ||
+      msg.includes('context has been closed') ||
+      msg.includes('Target page, context or browser has been closed');
+
+    if (isTerminal) {
+      await log(`  🚨  Terminal error (browser closed/destroyed) detected in Row ${rowNum}. Terminating execution.`);
+      throw err;
+    }
+
     // Try to recover navigation
     try { await navigateToClaimSearch(page, sendEvent); } catch { /* ignore recovery failure */ }
 
@@ -750,6 +767,7 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
     if (wsEndpoint) {
       await log(`🚀 Connecting to remote browser at ${wsEndpoint}...`);
       browser = await playwright.connectOverCDP(wsEndpoint);
+      await log(`✅ Connected to remote browser.`);
     } else if (isVercel) {
       await log(`🚀 Launching @sparticuz/chromium for Vercel...`);
       browser = await playwright.launch({
@@ -757,6 +775,7 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
         executablePath: await chromium.executablePath(),
         headless: true,
       });
+      await log(`✅ @sparticuz/chromium launched successfully.`);
     } else {
       await log(`🚀 Launching Chrome locally (headless=${headless}) — Akamai mode: real keystrokes...`);
       browser = await playwright.launch({
@@ -769,14 +788,17 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
           '--enable-webgl',
         ],
       });
+      await log(`✅ Local Chrome launched successfully.`);
     }
 
     context = await browser.newContext({
       viewport: { width: 1440, height: 900 },
       userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     });
+    await log(`✅ Browser context created.`);
     const page = await context.newPage();
     page.setDefaultTimeout(30_000);
+    await log(`✅ Browser page created.`);
 
     // ── Akamai sensor debug: intercept the authenticate call to log headers ──
     // This lets us see the wu44b0puoj-* sensor headers Akamai's JS generates.
