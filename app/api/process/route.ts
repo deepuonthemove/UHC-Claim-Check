@@ -26,6 +26,7 @@ export async function POST(req: NextRequest) {
     const formData  = await req.formData();
     const startIndex = parseInt((formData.get('startIndex') as string) || '0', 10);
     const browserType = (formData.get('browserType') as string) || 'chrome';
+    const attempt = parseInt((formData.get('attempt') as string) || '1', 10);
 
     const claimRowsJson = formData.get('claimRows') as string | null;
     if (!claimRowsJson) {
@@ -73,8 +74,9 @@ export async function POST(req: NextRequest) {
           // 1. Pad stream start to bypass Cloudflare / Vercel buffering (8 KB)
           await sendEvent({ type: 'padding', message: 'x'.repeat(8192) });
 
+          const targetRow = claims[startIndex]?.rowIndex ?? (startIndex + 2);
           await log(startIndex > 0
-            ? `🔄 Resuming from row ${startIndex + 1} of ${claims.length}...`
+            ? `🔄 Resuming from Excel Row ${targetRow} of ${claims.length + 1} (attempt ${attempt})...`
             : `📊 Received ${claims.length} claim row(s) to process.`
           );
           await sendEvent({ type: 'progress', completed: startIndex, total: claims.length });
@@ -88,6 +90,7 @@ export async function POST(req: NextRequest) {
             claims,
             startIndex,
             browserType,
+            attempt,
             batchSize:      10,
             maxExecutionMs: 4 * 60 * 1_000,
             sendEvent,

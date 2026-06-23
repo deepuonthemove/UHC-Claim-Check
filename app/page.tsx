@@ -87,7 +87,7 @@ export default function HomePage() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [status,       setStatus]       = useState('');
   const [logs,         setLogs]         = useState<string[]>([]);
-  const [errorScreenshots, setErrorScreenshots] = useState<{ index: number; rowIndex?: number; image: string }[]>([]);
+  const [errorScreenshots, setErrorScreenshots] = useState<{ index: number; rowIndex?: number; attempt?: number; image: string }[]>([]);
   const [progress,     setProgress]     = useState<{ completed: number; total: number } | null>(null);
   const [browserType,  setBrowserType]  = useState<'chrome' | 'firefox'>('chrome');
 
@@ -211,13 +211,13 @@ export default function HomePage() {
     }).filter(r => r.subscriberNo);
   }
 
-  // ── Process one SSE batch ──────────────────────────────────────────────────
   const processChunk = async (startIndex: number, totalRows: number) => {
     const formData = new FormData();
     formData.append('loginExcel',  loginFile!);
     formData.append('claimRows',   JSON.stringify(claimRows.current));
     formData.append('startIndex',  String(startIndex));
     formData.append('browserType', browserType);
+    formData.append('attempt',     String(consecutiveRetries.current + 1));
 
     const ctrl = new AbortController();
     let currentCompleted = startIndex;
@@ -259,7 +259,7 @@ export default function HomePage() {
               }
 
             } else if (event.type === 'error_screenshot') {
-              setErrorScreenshots(prev => [...prev, { index: event.index, rowIndex: event.rowIndex, image: event.image }]);
+              setErrorScreenshots(prev => [...prev, { index: event.index, rowIndex: event.rowIndex, attempt: event.attempt, image: event.image }]);
               
               // Auto-download error screenshot as well
               try {
@@ -273,8 +273,9 @@ export default function HomePage() {
                 const url  = URL.createObjectURL(blob);
                 const a    = document.createElement('a');
                 a.href     = url;
-                const rowLabel = event.rowIndex ? `row_${event.rowIndex}` : (event.index === -1 ? 'login' : `row_${event.index + 1}`);
-                a.download = `error_screenshot_${rowLabel}.jpg`;
+                const rowLabel = event.rowIndex ? `row_${event.rowIndex}` : (event.index === -1 ? 'login' : `row_${event.index + 2}`);
+                const attemptLabel = event.attempt ? `_attempt_${event.attempt}` : '';
+                a.download = `error_screenshot_${rowLabel}${attemptLabel}.jpg`;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
@@ -292,8 +293,9 @@ export default function HomePage() {
                   const url  = URL.createObjectURL(blob);
                   const a    = document.createElement('a');
                   a.href     = url;
-                  const rowLabel = event.rowIndex ? `row_${event.rowIndex}` : (event.index === -1 ? 'login' : `row_${event.index + 1}`);
-                  a.download = `debug_dom_${rowLabel}.html`;
+                  const rowLabel = event.rowIndex ? `row_${event.rowIndex}` : (event.index === -1 ? 'login' : `row_${event.index + 2}`);
+                  const attemptLabel = event.attempt ? `_attempt_${event.attempt}` : '';
+                  a.download = `debug_dom_${rowLabel}${attemptLabel}.html`;
                   document.body.appendChild(a);
                   a.click();
                   document.body.removeChild(a);
@@ -374,12 +376,14 @@ export default function HomePage() {
       if (consecutiveRetries.current < 3) {
         consecutiveRetries.current += 1;
         const retryDelay = 3000;
-        setStatus(`⚠️ Failure occurred. Retrying automatically in 3s (attempt ${consecutiveRetries.current}/3) from row ${currentCompleted + 1}...`);
-        setLogs(prev => [...prev, `⚠️ Failure occurred. Retrying automatically in 3s (attempt ${consecutiveRetries.current}/3) from row ${currentCompleted + 1}...`]);
+        const targetExcelRow = claimRows.current[currentCompleted]?.rowIndex ?? (currentCompleted + 2);
+        setStatus(`⚠️ Failure occurred. Retrying automatically in 3s (attempt ${consecutiveRetries.current}/3) from Excel Row ${targetExcelRow}...`);
+        setLogs(prev => [...prev, `⚠️ Failure occurred. Retrying automatically in 3s (attempt ${consecutiveRetries.current}/3) from Excel Row ${targetExcelRow}...`]);
         await new Promise(resolve => setTimeout(resolve, retryDelay));
         await processChunk(currentCompleted, totalRows);
       } else {
-        setStatus(`❌ Process failed after 3 automatic retries at row ${currentCompleted + 1}.`);
+        const targetExcelRow = claimRows.current[currentCompleted]?.rowIndex ?? (currentCompleted + 2);
+        setStatus(`❌ Process failed after 3 automatic retries at Excel Row ${targetExcelRow}.`);
         setLogs(prev => [...prev, `❌ Auto-retry limit (3 attempts) reached. Stopping automation.`]);
         setIsProcessing(false);
       }
@@ -387,7 +391,8 @@ export default function HomePage() {
     }
 
     if (currentCompleted < totalRows) {
-      setStatus(`⏩ Auto-resuming from row ${currentCompleted + 1}...`);
+      const targetExcelRow = claimRows.current[currentCompleted]?.rowIndex ?? (currentCompleted + 2);
+      setStatus(`⏩ Auto-resuming from Excel Row ${targetExcelRow}...`);
       await processChunk(currentCompleted, totalRows);
     } else {
       // All batches done — run post-processing, then write once
@@ -569,11 +574,12 @@ export default function HomePage() {
                   onClick={async () => {
                     setIsProcessing(true);
                     consecutiveRetries.current = 0; // Reset retries on manual resume
-                    setStatus(`⏩ Resuming manually from row ${progress.completed + 1}...`);
+                    const nextExcelRow = claimRows.current[progress.completed]?.rowIndex ?? (progress.completed + 2);
+                    setStatus(`⏩ Resuming manually from Excel Row ${nextExcelRow}...`);
                     await processChunk(progress.completed, progress.total);
                   }}
                 >
-                  ⏩ Resume from Row {progress.completed + 1}
+                  ⏩ Resume from Excel Row {claimRows.current[progress.completed]?.rowIndex ?? (progress.completed + 2)}
                 </button>
               )}
             </div>
@@ -645,27 +651,33 @@ export default function HomePage() {
           {/* Error screenshots */}
           {errorScreenshots.length > 0 && (
             <div style={{ marginTop: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {errorScreenshots.map((err, i) => (
-                <div key={i} className="card card--error">
-                  <div className="card-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span>{err.rowIndex ? `📸 Error Screenshot — Excel Row ${err.rowIndex}` : err.index === -1 ? '📸 Login Error Screenshot' : `📸 Error Screenshot — Row ${err.index + 1}`}</span>
-                    <a
-                      href={`data:image/jpeg;base64,${err.image}`}
-                      download={`error_screenshot_${err.rowIndex ? `row_${err.rowIndex}` : err.index === -1 ? 'login' : `row_${err.index + 1}`}.jpg`}
-                      className="btn btn--secondary"
-                      style={{ padding: '2px 8px', fontSize: '0.75rem', width: 'auto', display: 'inline-block', textDecoration: 'none' }}
-                    >
-                      Download JPG
-                    </a>
+              {errorScreenshots.map((err, i) => {
+                const rowLabel = err.rowIndex ? `Excel Row ${err.rowIndex}` : err.index === -1 ? 'Login' : `Row ${err.index + 2}`;
+                const attemptLabel = err.attempt ? ` — Attempt ${err.attempt}` : '';
+                const downloadFilename = `error_screenshot_${err.rowIndex ? `row_${err.rowIndex}` : err.index === -1 ? 'login' : `row_${err.index + 2}`}${err.attempt ? `_attempt_${err.attempt}` : ''}.jpg`;
+                
+                return (
+                  <div key={i} className="card card--error">
+                    <div className="card-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>📸 {rowLabel}{attemptLabel} Error Screenshot</span>
+                      <a
+                        href={`data:image/jpeg;base64,${err.image}`}
+                        download={downloadFilename}
+                        className="btn btn--secondary"
+                        style={{ padding: '2px 8px', fontSize: '0.75rem', width: 'auto', display: 'inline-block', textDecoration: 'none' }}
+                      >
+                        Download JPG
+                      </a>
+                    </div>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={`data:image/jpeg;base64,${err.image}`}
+                      alt="Browser state at error"
+                      style={{ maxWidth: '100%', borderRadius: '6px', marginTop: '8px' }}
+                    />
                   </div>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={`data:image/jpeg;base64,${err.image}`}
-                    alt="Browser state at error"
-                    style={{ maxWidth: '100%', borderRadius: '6px', marginTop: '8px' }}
-                  />
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </section>

@@ -68,7 +68,6 @@ const SEL = {
 
 const CLAIMS_URL = 'https://secure.uhcprovider.com/#/claims';
 
-// ── SSE Event types ──────────────────────────────────────────────────────────
 export interface SseEvent {
   type: 'log' | 'progress' | 'row_update' | 'error_screenshot' | 'debug_html' | 'done' | 'error' | 'padding';
   message?: string;
@@ -76,6 +75,7 @@ export interface SseEvent {
   total?: number;
   index?: number;    // 0-based index into claimRows array (for workbook update)
   rowIndex?: number; // 1-based Excel row number
+  attempt?: number;  // Chunk execution attempt number
   update?: BotFields;
   image?: string;
   html?: string;
@@ -211,6 +211,7 @@ async function login(
   password: string,
   baseUrl: string,
   startRowIndex: number,
+  attempt: number,
   sendEvent: SendEvent
 ) {
   const log = (msg: string) => sendEvent({ type: 'log', message: msg });
@@ -219,9 +220,9 @@ async function login(
   const failWithDiagnostics = async (reason: string): Promise<never> => {
     try {
       const ss   = await page.screenshot({ type: 'jpeg', quality: 60 });
-      await sendEvent({ type: 'error_screenshot', index: -1, rowIndex: startRowIndex, image: ss.toString('base64') });
+      await sendEvent({ type: 'error_screenshot', index: -1, rowIndex: startRowIndex, attempt, image: ss.toString('base64') });
       const html = await page.evaluate(() => document.documentElement.outerHTML);
-      await sendEvent({ type: 'debug_html', index: -1, rowIndex: startRowIndex, html });
+      await sendEvent({ type: 'debug_html', index: -1, rowIndex: startRowIndex, attempt, html });
     } catch { /* ignore diagnostic errors */ }
     const err = new Error(reason);
     (err as any).diagnosticsCaptured = true;
@@ -703,6 +704,7 @@ async function processRow(
   arrayIndex: number,   // 0-based index for workbook update
   rowNum: number,       // 1-based (i + startIndex + 1) for logging
   total: number,
+  attempt: number,
   sendEvent: SendEvent
 ): Promise<BotFields> {
   const log = (msg: string) => sendEvent({ type: 'log', message: msg });
@@ -764,9 +766,9 @@ async function processRow(
     // Capture screenshot + HTML for debugging
     try {
       const ss = await page.screenshot({ type: 'jpeg', quality: 60 });
-      await sendEvent({ type: 'error_screenshot', index: arrayIndex, rowIndex: claim.rowIndex, image: ss.toString('base64') });
+      await sendEvent({ type: 'error_screenshot', index: arrayIndex, rowIndex: claim.rowIndex, attempt, image: ss.toString('base64') });
       const html = await page.evaluate(() => document.documentElement.outerHTML);
-      await sendEvent({ type: 'debug_html', index: arrayIndex, rowIndex: claim.rowIndex, html });
+      await sendEvent({ type: 'debug_html', index: arrayIndex, rowIndex: claim.rowIndex, attempt, html });
     } catch (diagErr) {
       await log(`  ⚠️  Could not capture error diagnostics: ${diagErr}`);
     }
@@ -807,6 +809,7 @@ export interface AutomationOptions {
   claims: ClaimRow[];
   startIndex: number;
   browserType?: string; // 'chrome' | 'firefox'
+  attempt?: number;
   batchSize?: number;
   maxExecutionMs?: number;
   sendEvent: SendEvent;
@@ -820,6 +823,7 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
     claims,
     startIndex,
     browserType    = 'chrome',
+    attempt        = 1,
     batchSize      = 10,
     maxExecutionMs = 4 * 60 * 1_000,
     sendEvent,
@@ -899,7 +903,7 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
     });
 
     const startRowIndex = claims[startIndex]?.rowIndex ?? 2;
-    await login(page, username, password, baseUrl, startRowIndex, sendEvent);
+    await login(page, username, password, baseUrl, startRowIndex, attempt, sendEvent);
     await navigateToClaimSearch(page, sendEvent);
 
     await log(`\n📊 Processing ${claims.length} rows. Starting from index ${startIndex}. Batch size: ${batchSize}.`);
@@ -918,7 +922,7 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
         break;
       }
 
-      const fields = await processRow(page, claims[i], i, i + 1, claims.length, sendEvent);
+      const fields = await processRow(page, claims[i], i, i + 1, claims.length, attempt, sendEvent);
 
       await sendEvent({
         type:     'row_update',
@@ -948,9 +952,9 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
       try {
         const startRowIndex = claims[startIndex]?.rowIndex ?? 2;
         const ss = await page.screenshot({ type: 'jpeg', quality: 60 });
-        await sendEvent({ type: 'error_screenshot', index: -1, rowIndex: startRowIndex, image: ss.toString('base64') });
+        await sendEvent({ type: 'error_screenshot', index: -1, rowIndex: startRowIndex, attempt, image: ss.toString('base64') });
         const html = await page.evaluate(() => document.documentElement.outerHTML);
-        await sendEvent({ type: 'debug_html', index: -1, rowIndex: startRowIndex, html });
+        await sendEvent({ type: 'debug_html', index: -1, rowIndex: startRowIndex, attempt, html });
         (err as any).diagnosticsCaptured = true;
       } catch (diagErr) {
         await log(`⚠️ Could not capture diagnostic logs on crash: ${diagErr}`);
