@@ -89,6 +89,7 @@ export default function HomePage() {
   const [logs,         setLogs]         = useState<string[]>([]);
   const [errorScreenshots, setErrorScreenshots] = useState<{ index: number; image: string }[]>([]);
   const [progress,     setProgress]     = useState<{ completed: number; total: number } | null>(null);
+  const [browserType,  setBrowserType]  = useState<'chrome' | 'firefox'>('chrome');
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -216,6 +217,7 @@ export default function HomePage() {
     formData.append('loginExcel',  loginFile!);
     formData.append('claimRows',   JSON.stringify(claimRows.current));
     formData.append('startIndex',  String(startIndex));
+    formData.append('browserType', browserType);
 
     const ctrl = new AbortController();
     let currentCompleted = startIndex;
@@ -484,6 +486,36 @@ export default function HomePage() {
               </button>
               <div className="hint">
                 Uses the File System Access API — grants direct write access so data is saved after every row.
+              </div>
+            </div>
+
+            {/* Browser choice */}
+            <div className="card">
+              <div className="card-label">Step 2b — Browser Type</div>
+              <div className="card-desc">Choose local automation browser</div>
+              <div style={{ display: 'flex', gap: '16px', marginTop: '8px' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.85rem' }}>
+                  <input
+                    type="radio"
+                    name="browserType"
+                    value="chrome"
+                    checked={browserType === 'chrome'}
+                    onChange={() => setBrowserType('chrome')}
+                    style={{ cursor: 'pointer' }}
+                  />
+                  <span>Chrome</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.85rem' }}>
+                  <input
+                    type="radio"
+                    name="browserType"
+                    value="firefox"
+                    checked={browserType === 'firefox'}
+                    onChange={() => setBrowserType('firefox')}
+                    style={{ cursor: 'pointer' }}
+                  />
+                  <span>Firefox</span>
+                </label>
               </div>
             </div>
 

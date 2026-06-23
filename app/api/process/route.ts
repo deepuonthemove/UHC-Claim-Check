@@ -25,6 +25,7 @@ export async function POST(req: NextRequest) {
     // Parse request before establishing the stream so synchronous errors return proper HTTP 500
     const formData  = await req.formData();
     const startIndex = parseInt((formData.get('startIndex') as string) || '0', 10);
+    const browserType = (formData.get('browserType') as string) || 'chrome';
 
     const claimRowsJson = formData.get('claimRows') as string | null;
     if (!claimRowsJson) {
@@ -86,6 +87,7 @@ export async function POST(req: NextRequest) {
             baseUrl:    credentials.url,
             claims,
             startIndex,
+            browserType,
             batchSize:      10,
             maxExecutionMs: 4 * 60 * 1_000,
             sendEvent,

@@ -8,7 +8,7 @@
  * - Robust login: tries multiple selector strategies, logs each attempt
  * - Screenshot + debug_html captured on every row failure
  */
-import { chromium as playwright, type Browser, type BrowserContext, type Page } from 'playwright-core';
+import { chromium as playwrightChromium, firefox as playwrightFirefox, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import chromium from '@sparticuz/chromium';
 import { generateTOTP, totpSecondsRemaining } from './totp';
 import type { ClaimRow, BotFields } from './excel';
@@ -785,6 +785,7 @@ export interface AutomationOptions {
   baseUrl: string;
   claims: ClaimRow[];
   startIndex: number;
+  browserType?: string; // 'chrome' | 'firefox'
   batchSize?: number;
   maxExecutionMs?: number;
   sendEvent: SendEvent;
@@ -797,6 +798,7 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
     baseUrl,
     claims,
     startIndex,
+    browserType    = 'chrome',
     batchSize      = 10,
     maxExecutionMs = 4 * 60 * 1_000,
     sendEvent,
@@ -816,19 +818,28 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
   try {
     if (wsEndpoint) {
       await log(`🚀 Connecting to remote browser at ${wsEndpoint}...`);
-      browser = await playwright.connectOverCDP(wsEndpoint);
+      browser = await playwrightChromium.connectOverCDP(wsEndpoint);
       await log(`✅ Connected to remote browser.`);
     } else if (isVercel) {
+      if (browserType === 'firefox') {
+        await log(`⚠️ Firefox requested, but Vercel only supports @sparticuz/chromium serverless. Falling back to @sparticuz/chromium...`);
+      }
       await log(`🚀 Launching @sparticuz/chromium for Vercel...`);
-      browser = await playwright.launch({
+      browser = await playwrightChromium.launch({
         args: chromium.args,
         executablePath: await chromium.executablePath(),
         headless: true,
       });
       await log(`✅ @sparticuz/chromium launched successfully.`);
+    } else if (browserType === 'firefox') {
+      await log(`🚀 Launching Firefox locally (headless=${headless})...`);
+      browser = await playwrightFirefox.launch({
+        headless,
+      });
+      await log(`✅ Local Firefox launched successfully.`);
     } else {
       await log(`🚀 Launching Chrome locally (headless=${headless}) — Akamai mode: real keystrokes...`);
-      browser = await playwright.launch({
+      browser = await playwrightChromium.launch({
         headless,
         channel: 'chromium',
         args: [
