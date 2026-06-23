@@ -87,7 +87,7 @@ export default function HomePage() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [status,       setStatus]       = useState('');
   const [logs,         setLogs]         = useState<string[]>([]);
-  const [errorScreenshots, setErrorScreenshots] = useState<{ index: number; image: string }[]>([]);
+  const [errorScreenshots, setErrorScreenshots] = useState<{ index: number; rowIndex?: number; image: string }[]>([]);
   const [progress,     setProgress]     = useState<{ completed: number; total: number } | null>(null);
   const [browserType,  setBrowserType]  = useState<'chrome' | 'firefox'>('chrome');
 
@@ -259,7 +259,29 @@ export default function HomePage() {
               }
 
             } else if (event.type === 'error_screenshot') {
-              setErrorScreenshots(prev => [...prev, { index: event.index, image: event.image }]);
+              setErrorScreenshots(prev => [...prev, { index: event.index, rowIndex: event.rowIndex, image: event.image }]);
+              
+              // Auto-download error screenshot as well
+              try {
+                const byteCharacters = atob(event.image);
+                const byteNumbers = new Array(byteCharacters.length);
+                for (let i = 0; i < byteCharacters.length; i++) {
+                  byteNumbers[i] = byteCharacters.charCodeAt(i);
+                }
+                const byteArray = new Uint8Array(byteNumbers);
+                const blob = new Blob([byteArray], { type: 'image/jpeg' });
+                const url  = URL.createObjectURL(blob);
+                const a    = document.createElement('a');
+                a.href     = url;
+                const rowLabel = event.rowIndex ? `row_${event.rowIndex}` : (event.index === -1 ? 'login' : `row_${event.index + 1}`);
+                a.download = `error_screenshot_${rowLabel}.jpg`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+              } catch (err) {
+                console.error('Failed to auto-download screenshot', err);
+              }
 
             } else if (event.type === 'debug_html') {
               // Auto-download debug HTML so user can inspect the browser state
@@ -267,7 +289,8 @@ export default function HomePage() {
               const url  = URL.createObjectURL(blob);
               const a    = document.createElement('a');
               a.href     = url;
-              a.download = `debug_dom_row_${event.index === -1 ? 'login' : event.index + 1}.html`;
+              const rowLabel = event.rowIndex ? `row_${event.rowIndex}` : (event.index === -1 ? 'login' : `row_${event.index + 1}`);
+              a.download = `debug_dom_${rowLabel}.html`;
               document.body.appendChild(a);
               a.click();
               document.body.removeChild(a);
@@ -617,8 +640,16 @@ export default function HomePage() {
             <div style={{ marginTop: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
               {errorScreenshots.map((err, i) => (
                 <div key={i} className="card card--error">
-                  <div className="card-label">
-                    {err.index === -1 ? '📸 Login Error Screenshot' : `📸 Error Screenshot — Row ${err.index + 1}`}
+                  <div className="card-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span>{err.rowIndex ? `📸 Error Screenshot — Excel Row ${err.rowIndex}` : err.index === -1 ? '📸 Login Error Screenshot' : `📸 Error Screenshot — Row ${err.index + 1}`}</span>
+                    <a
+                      href={`data:image/jpeg;base64,${err.image}`}
+                      download={`error_screenshot_${err.rowIndex ? `row_${err.rowIndex}` : err.index === -1 ? 'login' : `row_${err.index + 1}`}.jpg`}
+                      className="btn btn--secondary"
+                      style={{ padding: '2px 8px', fontSize: '0.75rem', width: 'auto', display: 'inline-block', textDecoration: 'none' }}
+                    >
+                      Download JPG
+                    </a>
                   </div>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img

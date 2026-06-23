@@ -261,7 +261,7 @@ async function login(
   await page.type(SEL.STEP1_USERNAME, username, { delay: 80 });
   await log(`  ✏️  Typed username: ${username}`);
 
-  const ERROR_SEL = '[data-cy="data-loginerrorsummary-error"], .error-msg';
+  const ERROR_SEL = '#loginerrorsummary, [data-cy="data-loginerrorsummary-error"], .error-msg';
 
   let step1Success = false;
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -272,23 +272,43 @@ async function login(
         await page.waitForTimeout(2_000);
       }
 
+      // Remove any existing error message from the DOM so we don't match it instantly on retry
+      await page.evaluate((sel) => {
+        document.querySelectorAll(sel).forEach(el => el.remove());
+      }, ERROR_SEL).catch(() => {});
+
       await page.click(SEL.STEP1_CONTINUE);
       await log(`  🖱️  Clicked Continue (Step 1 — Sign In) (attempt ${attempt}/3).`);
 
-      // Wait up to 6 seconds to see if the page navigates OR shows an error
+      // Wait up to 6 seconds to see if the page navigates (password field appears) OR shows an error
       try {
         await Promise.race([
-          page.locator(SEL.STEP1_USERNAME).waitFor({ state: 'detached', timeout: 6_000 }),
+          page.locator(SEL.STEP2_PASSWORD).waitFor({ state: 'visible', timeout: 6_000 }),
           page.locator(ERROR_SEL).waitFor({ state: 'visible', timeout: 6_000 }),
         ]);
       } catch {
         // timeout/race completed without throwing or one of them resolved
       }
 
-      // Check if we succeeded (username field is gone/detached)
+      // Check if we succeeded:
+      // 1. Password field is visible or present in the HTML/DOM
+      // 2. URL contains "password" (case-insensitive)
+      // 3. Username field is readonly (indicating we have moved to the password page)
+      // 4. Username field is gone/detached
+      const urlHasPassword = page.url().toLowerCase().includes('password');
+      const passwordExists = await page.evaluate(() => {
+        return !!document.querySelector('input#login-pwd, input[type="password"]');
+      }).catch(() => false);
+      const passwordVisible = await page.locator(SEL.STEP2_PASSWORD).isVisible().catch(() => false);
       const usernameVisible = await page.locator(SEL.STEP1_USERNAME).isVisible().catch(() => false);
-      if (!usernameVisible) {
-        await log('  ✅ Step 1/3 complete (username submitted successfully).');
+      
+      const usernameIsReadonly = await page.evaluate(() => {
+        const input = document.querySelector('input#username') as HTMLInputElement | null;
+        return input ? (input.readOnly || input.hasAttribute('readonly')) : false;
+      }).catch(() => false);
+
+      if (passwordVisible || passwordExists || urlHasPassword || usernameIsReadonly || !usernameVisible) {
+        await log(`  ✅ Step 1/3 complete (username submitted successfully). Reason: passwordVisible=${passwordVisible}, passwordExists=${passwordExists}, urlHasPassword=${urlHasPassword}, usernameIsReadonly=${usernameIsReadonly}, usernameVisible=${usernameVisible}`);
         step1Success = true;
         break;
       }
@@ -743,9 +763,9 @@ async function processRow(
     // Capture screenshot + HTML for debugging
     try {
       const ss = await page.screenshot({ type: 'jpeg', quality: 60 });
-      await sendEvent({ type: 'error_screenshot', index: arrayIndex, image: ss.toString('base64') });
+      await sendEvent({ type: 'error_screenshot', index: arrayIndex, rowIndex: claim.rowIndex, image: ss.toString('base64') });
       const html = await page.evaluate(() => document.documentElement.outerHTML);
-      await sendEvent({ type: 'debug_html', index: arrayIndex, html });
+      await sendEvent({ type: 'debug_html', index: arrayIndex, rowIndex: claim.rowIndex, html });
     } catch (diagErr) {
       await log(`  ⚠️  Could not capture error diagnostics: ${diagErr}`);
     }
