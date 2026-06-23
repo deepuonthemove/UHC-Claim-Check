@@ -83,6 +83,7 @@ interface ClaimRow {
 export default function HomePage() {
   const [loginFile,    setLoginFile]    = useState<File | null>(null);
   const [claimFileHandle, setClaimFileHandle] = useState<FileSystemFileHandle | null>(null);
+  const [fallbackClaimFile, setFallbackClaimFile] = useState<File | null>(null);
   const [claimFileName, setClaimFileName] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [status,       setStatus]       = useState('');
@@ -90,6 +91,7 @@ export default function HomePage() {
   const [errorScreenshots, setErrorScreenshots] = useState<{ index: number; rowIndex?: number; attempt?: number; image: string }[]>([]);
   const [progress,     setProgress]     = useState<{ completed: number; total: number } | null>(null);
   const [browserType,  setBrowserType]  = useState<'chrome' | 'firefox'>('chrome');
+  const [hasFilePickerAPI, setHasFilePickerAPI] = useState(false);
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -105,9 +107,13 @@ export default function HomePage() {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
+  useEffect(() => {
+    setHasFilePickerAPI(typeof window !== 'undefined' && 'showOpenFilePicker' in window);
+  }, []);
+
   const canSubmit = useMemo(
-    () => Boolean(loginFile && claimFileHandle && !isProcessing),
-    [loginFile, claimFileHandle, isProcessing]
+    () => Boolean(loginFile && (claimFileHandle || fallbackClaimFile) && !isProcessing),
+    [loginFile, claimFileHandle, fallbackClaimFile, isProcessing]
   );
 
   // ── Pick claims file with File System Access API ───────────────────────────
@@ -402,7 +408,23 @@ export default function HomePage() {
         await writeQueue.current; // flush any pending
         queueWrite();             // write post-processed version
         await writeQueue.current;
-        setStatus('✅ Processing complete! Excel file updated on disk.');
+        
+        if (!claimFileHandle && excelWb.current) {
+          setStatus('💾 Downloading completed Excel file...');
+          const buf = await excelWb.current.xlsx.writeBuffer();
+          const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = claimFileName ? `updated_${claimFileName}` : 'updated_claims.xlsx';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          setStatus('✅ Processing complete! Excel file downloaded successfully.');
+        } else {
+          setStatus('✅ Processing complete! Excel file updated on disk.');
+        }
       } catch (err) {
         setStatus(`⚠️ Post-processing failed: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
@@ -411,10 +433,9 @@ export default function HomePage() {
     }
   };
 
-  // ── Form submit ─────────────────────────────────────────────────────────────
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (!loginFile || !claimFileHandle) return;
+    if (!loginFile || (!claimFileHandle && !fallbackClaimFile)) return;
 
     setIsProcessing(true);
     setStatus('📂 Reading claim file...');
@@ -424,17 +445,22 @@ export default function HomePage() {
     consecutiveRetries.current = 0;
 
     try {
-      // Ensure readwrite permission
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const handle = claimFileHandle as any;
-      if ((await handle.queryPermission({ mode: 'readwrite' })) !== 'granted') {
-        if ((await handle.requestPermission({ mode: 'readwrite' })) !== 'granted') {
-          throw new Error('Write permission denied. Cannot update Excel file.');
+      let file: File;
+      if (claimFileHandle) {
+        // Ensure readwrite permission
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const handle = claimFileHandle as any;
+        if ((await handle.queryPermission({ mode: 'readwrite' })) !== 'granted') {
+          if ((await handle.requestPermission({ mode: 'readwrite' })) !== 'granted') {
+            throw new Error('Write permission denied. Cannot update Excel file.');
+          }
         }
+        file = await claimFileHandle.getFile();
+      } else {
+        file = fallbackClaimFile!;
       }
 
       // Load file into memory (both XLSX for quick parsing and ExcelJS for style-preserving writes)
-      const file        = await claimFileHandle.getFile();
       const arrayBuffer = await file.arrayBuffer();
 
       // SheetJS parse for claim rows (fast)
@@ -508,20 +534,45 @@ export default function HomePage() {
             {/* Step 2: Claims file */}
             <div className="card">
               <div className="card-label">Step 2 — Claims File</div>
-              <div className="card-desc">
-                Pick <code>TPm UHC claims details.xlsx</code> — updates this file in-place
-              </div>
-              <button
-                type="button"
-                className={`btn btn--secondary btn--full ${claimFileName ? 'file-drop--loaded' : ''}`}
-                onClick={selectClaimFile}
-                id="pick-claims-btn"
-              >
-                {claimFileName ? `✓  ${claimFileName}` : '📂  Pick Claims File…'}
-              </button>
-              <div className="hint">
-                Uses the File System Access API — grants direct write access so data is saved after every row.
-              </div>
+              {hasFilePickerAPI ? (
+                <>
+                  <div className="card-desc">
+                    Pick <code>TPm UHC claims details.xlsx</code> — updates this file in-place
+                  </div>
+                  <button
+                    type="button"
+                    className={`btn btn--secondary btn--full ${claimFileName ? 'file-drop--loaded' : ''}`}
+                    onClick={selectClaimFile}
+                    id="pick-claims-btn"
+                  >
+                    {claimFileName ? `✓  ${claimFileName}` : '📂  Pick Claims File…'}
+                  </button>
+                  <div className="hint">
+                    Uses the File System Access API — grants direct write access so data is saved after every row.
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="card-desc">
+                    Upload <code>TPm UHC claims details.xlsx</code> (Direct writing is not supported in this browser; file will download at the end)
+                  </div>
+                  <label className={`file-drop ${fallbackClaimFile ? 'file-drop--loaded' : ''}`} htmlFor="claim-file-input">
+                    <input
+                      id="claim-file-input"
+                      type="file"
+                      accept=".xlsx,.xls"
+                      className="sr-only"
+                      onChange={e => {
+                        const file = e.target.files?.[0] ?? null;
+                        setFallbackClaimFile(file);
+                        setClaimFileName(file ? file.name : '');
+                      }}
+                    />
+                    <span className="file-icon">{fallbackClaimFile ? '✓' : '📂'}</span>
+                    <span>{fallbackClaimFile ? fallbackClaimFile.name : 'Click to select claims file'}</span>
+                  </label>
+                </>
+              )}
             </div>
 
             {/* Browser choice */}
@@ -600,6 +651,33 @@ export default function HomePage() {
               <div className={`card ${status.startsWith('❌') ? 'card--error' : ''}`}>
                 <div className="card-label">Status</div>
                 <div style={{ fontSize: '0.85rem' }}>{status}</div>
+              </div>
+            )}
+
+            {/* Download button for fallback mode */}
+            {!claimFileHandle && progress && (
+              <div className="card">
+                <div className="card-label">Download Output</div>
+                <button
+                  type="button"
+                  className="btn btn--secondary btn--full"
+                  disabled={isProcessing}
+                  onClick={async () => {
+                    if (!excelWb.current) return;
+                    const buf = await excelWb.current.xlsx.writeBuffer();
+                    const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = claimFileName ? `updated_${claimFileName}` : 'updated_claims.xlsx';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                  }}
+                >
+                  💾 Download Updated Excel
+                </button>
               </div>
             )}
 
