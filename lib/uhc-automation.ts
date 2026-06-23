@@ -210,6 +210,7 @@ async function login(
   username: string,
   password: string,
   baseUrl: string,
+  startRowIndex: number,
   sendEvent: SendEvent
 ) {
   const log = (msg: string) => sendEvent({ type: 'log', message: msg });
@@ -218,9 +219,9 @@ async function login(
   const failWithDiagnostics = async (reason: string): Promise<never> => {
     try {
       const ss   = await page.screenshot({ type: 'jpeg', quality: 60 });
-      await sendEvent({ type: 'error_screenshot', index: -1, image: ss.toString('base64') });
+      await sendEvent({ type: 'error_screenshot', index: -1, rowIndex: startRowIndex, image: ss.toString('base64') });
       const html = await page.evaluate(() => document.documentElement.outerHTML);
-      await sendEvent({ type: 'debug_html', index: -1, html });
+      await sendEvent({ type: 'debug_html', index: -1, rowIndex: startRowIndex, html });
     } catch { /* ignore diagnostic errors */ }
     const err = new Error(reason);
     (err as any).diagnosticsCaptured = true;
@@ -897,7 +898,8 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
       await route.continue();
     });
 
-    await login(page, username, password, baseUrl, sendEvent);
+    const startRowIndex = claims[startIndex]?.rowIndex ?? 2;
+    await login(page, username, password, baseUrl, startRowIndex, sendEvent);
     await navigateToClaimSearch(page, sendEvent);
 
     await log(`\n📊 Processing ${claims.length} rows. Starting from index ${startIndex}. Batch size: ${batchSize}.`);
@@ -944,10 +946,11 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
     // Capture screenshot + HTML if page is still open and we haven't already captured diagnostics
     if (!(err as any)?.diagnosticsCaptured && page && !page.isClosed()) {
       try {
+        const startRowIndex = claims[startIndex]?.rowIndex ?? 2;
         const ss = await page.screenshot({ type: 'jpeg', quality: 60 });
-        await sendEvent({ type: 'error_screenshot', index: -1, image: ss.toString('base64') });
+        await sendEvent({ type: 'error_screenshot', index: -1, rowIndex: startRowIndex, image: ss.toString('base64') });
         const html = await page.evaluate(() => document.documentElement.outerHTML);
-        await sendEvent({ type: 'debug_html', index: -1, html });
+        await sendEvent({ type: 'debug_html', index: -1, rowIndex: startRowIndex, html });
         (err as any).diagnosticsCaptured = true;
       } catch (diagErr) {
         await log(`⚠️ Could not capture diagnostic logs on crash: ${diagErr}`);

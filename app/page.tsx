@@ -285,16 +285,23 @@ export default function HomePage() {
 
             } else if (event.type === 'debug_html') {
               // Auto-download debug HTML so user can inspect the browser state
-              const blob = new Blob([event.html], { type: 'text/html' });
-              const url  = URL.createObjectURL(blob);
-              const a    = document.createElement('a');
-              a.href     = url;
-              const rowLabel = event.rowIndex ? `row_${event.rowIndex}` : (event.index === -1 ? 'login' : `row_${event.index + 1}`);
-              a.download = `debug_dom_${rowLabel}.html`;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-              URL.revokeObjectURL(url);
+              // Stagger by 1000ms to avoid browser blocking multiple concurrent downloads
+              setTimeout(() => {
+                try {
+                  const blob = new Blob([event.html], { type: 'text/html' });
+                  const url  = URL.createObjectURL(blob);
+                  const a    = document.createElement('a');
+                  a.href     = url;
+                  const rowLabel = event.rowIndex ? `row_${event.rowIndex}` : (event.index === -1 ? 'login' : `row_${event.index + 1}`);
+                  a.download = `debug_dom_${rowLabel}.html`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                } catch (err) {
+                  console.error('Failed to auto-download HTML', err);
+                }
+              }, 1000);
 
             } else if (event.type === 'error') {
               setStatus(`❌ Error: ${event.message}`);
