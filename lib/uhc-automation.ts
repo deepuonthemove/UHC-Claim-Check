@@ -222,7 +222,9 @@ async function login(
       const html = await page.evaluate(() => document.documentElement.outerHTML);
       await sendEvent({ type: 'debug_html', index: -1, html });
     } catch { /* ignore diagnostic errors */ }
-    throw new Error(reason);
+    const err = new Error(reason);
+    (err as any).diagnosticsCaptured = true;
+    throw err;
   };
 
   // ── Navigate to the login URL ──────────────────────────────────────────────
@@ -748,6 +750,10 @@ async function processRow(
       await log(`  ⚠️  Could not capture error diagnostics: ${diagErr}`);
     }
 
+    if (err instanceof Error) {
+      (err as any).diagnosticsCaptured = true;
+    }
+
     // If browser, context, or page is closed/destroyed, it's a terminal error
     const isTerminal = 
       msg.includes('closed') || 
@@ -904,13 +910,14 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
     const msg = err instanceof Error ? err.message : String(err);
     await log(`❌ Automation run error: ${msg}`);
 
-    // Capture screenshot + HTML if page is still open
-    if (page && !page.isClosed()) {
+    // Capture screenshot + HTML if page is still open and we haven't already captured diagnostics
+    if (!(err as any)?.diagnosticsCaptured && page && !page.isClosed()) {
       try {
         const ss = await page.screenshot({ type: 'jpeg', quality: 60 });
         await sendEvent({ type: 'error_screenshot', index: -1, image: ss.toString('base64') });
         const html = await page.evaluate(() => document.documentElement.outerHTML);
         await sendEvent({ type: 'debug_html', index: -1, html });
+        (err as any).diagnosticsCaptured = true;
       } catch (diagErr) {
         await log(`⚠️ Could not capture diagnostic logs on crash: ${diagErr}`);
       }
