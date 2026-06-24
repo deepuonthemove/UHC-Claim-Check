@@ -107,6 +107,32 @@ async function findFirst(page: Page, selectors: string[], timeout = 5000): Promi
   return null;
 }
 
+// ── Close claims & payments navigation menu if it is expanded and blocking the page ──
+async function closeNavDropdownIfOpen(page: Page, log: (msg: string) => Promise<void>) {
+  try {
+    const trigger = page.locator('button:has([data-testid="claims-and-payments-link"])');
+    if (await trigger.count() > 0) {
+      const state = await trigger.getAttribute('data-state');
+      const expanded = await trigger.getAttribute('aria-expanded');
+      if (state === 'open' || expanded === 'true') {
+        await log('  ⚠️  "Claims & Payments" dropdown menu is expanded/blocking. Clicking to close it...');
+        await trigger.click({ force: true });
+        try {
+          await page.waitForFunction(
+            (el) => el?.getAttribute('data-state') !== 'open' && el?.getAttribute('aria-expanded') !== 'true',
+            await trigger.elementHandle(),
+            { timeout: 3_000 }
+          );
+        } catch { /* ignore wait timeout */ }
+        await page.waitForTimeout(500); // allow animations to settle
+        await log('  ✖  Dropdown menu closed.');
+      }
+    }
+  } catch (err) {
+    await log(`  ⚠️  Failed to check/close navigation dropdown: ${err}`);
+  }
+}
+
 // ── Popup handler ─────────────────────────────────────────────────────────────
 //
 // After a search submit, UHC may show an error popup:
@@ -138,8 +164,13 @@ async function dismissPopupIfPresent(
 
   // Dismiss
   try {
-    await page.click(SEL.POPUP_CLOSE);
+    await page.click(SEL.POPUP_CLOSE, { force: true });
     await page.locator(SEL.POPUP_CLOSE).waitFor({ state: 'detached', timeout: 3_000 });
+    // Also wait for the message element to detach
+    try {
+      await page.locator(SEL.POPUP_MESSAGE).waitFor({ state: 'detached', timeout: 2_000 });
+    } catch { /* ignore if not detached or already gone */ }
+    await page.waitForTimeout(500); // allow animations to settle
     await log('  ✖  Popup closed.');
   } catch {
     await log('  ⚠️  Could not close popup — it may have already dismissed itself.');
@@ -528,6 +559,7 @@ async function navigateToClaimSearch(page: Page, sendEvent: SendEvent) {
   try {
     await page.waitForSelector(SEL.SEARCH_TYPE_BTN, { timeout: 8_000 });
     await log('  ✅  Arrived at Claim Status (direct URL).');
+    await closeNavDropdownIfOpen(page, log);
     return;
   } catch {
     await log('  ↩️  Direct URL fallback to menu navigation...');
@@ -541,6 +573,7 @@ async function navigateToClaimSearch(page: Page, sendEvent: SendEvent) {
   }
   await page.waitForSelector(SEL.SEARCH_TYPE_BTN, { timeout: 15_000 });
   await log('  ✅  Arrived at Claim Status (menu nav).');
+  await closeNavDropdownIfOpen(page, log);
 }
 
 // ── Select search type ────────────────────────────────────────────────────────
@@ -554,6 +587,9 @@ async function selectSearchType(page: Page) {
 // ── Fill and submit claim search form ─────────────────────────────────────────
 async function searchClaim(page: Page, claim: ClaimRow, sendEvent: SendEvent) {
   const log = (msg: string) => sendEvent({ type: 'log', message: msg });
+
+  // Close Claims & Payments dropdown if it is open/expanded and blocking UI
+  await closeNavDropdownIfOpen(page, log);
 
   await selectSearchType(page);
 
@@ -618,6 +654,20 @@ async function findMatchingClaim(
     // Check for popup
     const popupMessage = await dismissPopupIfPresent(page, sendEvent);
     if (popupMessage !== null) {
+      const lowerMsg = popupMessage.toLowerCase();
+      const isPermanent = 
+        lowerMsg.includes('member not found') || 
+        lowerMsg.includes('no claim found') || 
+        lowerMsg.includes('please check') || 
+        lowerMsg.includes('cannot be found') || 
+        lowerMsg.includes('check your entries') ||
+        lowerMsg.includes('check the data entered');
+
+      if (isPermanent) {
+        await log(`  ❌  Permanent search error popup: "${popupMessage}". Skipping retries.`);
+        return { popupError: popupMessage };
+      }
+
       if (attempt < MAX_ATTEMPTS) {
         await log(`  🔁  Popup dismissed — will retry once.`);
         continue;
@@ -643,6 +693,14 @@ async function findMatchingClaim(
 
       if (claimDate === targetDate) {
         await log(`  ✅  Match found: Claim ${payload.claimNumber} | Status: ${payload.claimStatus} | Date: ${claimDate}`);
+        await log(`  🔗  Clicking claim link to navigate (prevents KeyTooLongError)...`);
+        await links[i].click();
+        try {
+          await page.waitForURL(/\/summary\//, { timeout: 10_000 });
+          await page.waitForLoadState('networkidle', { timeout: 15_000 });
+        } catch (err) {
+          await log(`  ⚠️  Navigation wait failed: ${err}`);
+        }
         return { href, payload };
       }
 
@@ -650,6 +708,14 @@ async function findMatchingClaim(
         const col5 = await page.locator(`td.abyss-table-cell-col-5-row-${i + 1}`).innerText({ timeout: 1_000 });
         if (col5.trim() === targetDate) {
           await log(`  ✅  Match found via table col5: row ${i + 1}`);
+          await log(`  🔗  Clicking claim link to navigate (prevents KeyTooLongError)...`);
+          await links[i].click();
+          try {
+            await page.waitForURL(/\/summary\//, { timeout: 10_000 });
+            await page.waitForLoadState('networkidle', { timeout: 15_000 });
+          } catch (err) {
+            await log(`  ⚠️  Navigation wait failed: ${err}`);
+          }
           return { href, payload };
         }
       } catch { /* column may not exist */ }
@@ -666,14 +732,44 @@ async function findMatchingClaim(
 async function scrapeDetailPage(
   page: Page,
   href: string,
+  rowIndex: number,
+  attempt: number,
   sendEvent: SendEvent
 ): Promise<Partial<BotFields>> {
   const log = (msg: string) => sendEvent({ type: 'log', message: msg });
   const baseUrl = process.env.UHC_URL ?? 'https://secure.uhcprovider.com';
   const url = `${baseUrl}${href}`;
 
-  await log(`  🔗  Loading claim detail page...`);
-  await page.goto(url, { waitUntil: 'networkidle', timeout: 30_000 });
+  const currentUrl = page.url();
+  if (currentUrl.includes('/summary/')) {
+    await log(`  📄  Already on details page (via client-side navigation).`);
+  } else {
+    await log(`  🔗  Loading claim detail page via direct URL (fallback)...`);
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 30_000 });
+  }
+
+  // Capture details page screenshot and HTML for user inspection/scraped data confirmation
+  try {
+    const ss = await page.screenshot({ type: 'jpeg', quality: 60 });
+    await sendEvent({ 
+      type: 'error_screenshot', 
+      index: -2, 
+      rowIndex, 
+      attempt: attempt + 10, 
+      image: ss.toString('base64') 
+    });
+    const html = await page.evaluate(() => document.documentElement.outerHTML);
+    await sendEvent({ 
+      type: 'debug_html', 
+      index: -2, 
+      rowIndex, 
+      attempt: attempt + 10, 
+      html 
+    });
+    await log(`  📥  Downloaded claim detail page screenshot and DOM HTML (Attempt suffix +10).`);
+  } catch (diagErr) {
+    await log(`  ⚠️  Could not capture details page diagnostics: ${diagErr}`);
+  }
 
   const fields: Partial<BotFields> = {};
   try {
@@ -739,7 +835,7 @@ async function processRow(
 
 
     const p = match.payload;
-    const detailFields = await scrapeDetailPage(page, match.href, sendEvent);
+    const detailFields = await scrapeDetailPage(page, match.href, claim.rowIndex, attempt, sendEvent);
 
     const botFields: BotFields = {
       BotClaimNumber:   p.claimNumber ?? '',
