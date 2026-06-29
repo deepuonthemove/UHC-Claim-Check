@@ -252,6 +252,7 @@ async function login(
     try {
       const ss   = await page.screenshot({ type: 'jpeg', quality: 60 });
       await sendEvent({ type: 'error_screenshot', index: -1, rowIndex: startRowIndex, attempt, image: ss.toString('base64') });
+      await page.waitForTimeout(1000);
       const html = await page.evaluate(() => document.documentElement.outerHTML);
       await sendEvent({ type: 'debug_html', index: -1, rowIndex: startRowIndex, attempt, html });
     } catch { /* ignore diagnostic errors */ }
@@ -625,33 +626,252 @@ async function searchClaim(page: Page, claim: ClaimRow, sendEvent: SendEvent) {
 //   Attempt 2 → dismiss popup → return { popupError } so the caller can
 //               write the popup message into the BotStatus column.
 //
+async function waitForOverlayLoader(page: Page, log: (msg: string) => Promise<void>) {
+  try {
+    await page.waitForTimeout(300);
+    // Locate the first overlay. We wait for it to be hidden (either detached or display: none)
+    const loader = page.locator('.abyss-loading-overlay-root').first();
+    if (await loader.count() > 0 && await loader.isVisible()) {
+      await log('  ⏳  Loading overlay detected. Waiting for loader to complete...');
+      await loader.waitFor({ state: 'hidden', timeout: 10_000 });
+      await log('  ✅  Loading overlay completed.');
+    }
+  } catch (err) {
+    await log(`  ⚠️  Error or timeout waiting for loading overlay: ${err}`);
+  }
+}
+
+// ── Wait for sub-loaders on detail page to complete ──────────────────────────
+async function waitForClaimDetailLoaders(page: Page, log: (msg: string) => Promise<void>) {
+  await log('  ⏳  Waiting for UHC claim details to load and render...');
+  await waitForOverlayLoader(page, log);
+
+  // Wait for all core card-level "Please wait while we retrieve..." messages and spinner elements to disappear
+  try {
+    await page.waitForFunction(() => {
+      const claimNum = document.querySelector('[data-testid="overview-claim-number"], [data-testid="cs-claim-number"]')?.textContent?.trim();
+      const patientName = document.querySelector('[data-testid="overview-patient-name"], [data-testid="pi-patient-name-content"]')?.textContent?.trim();
+
+      const loaders = Array.from(document.querySelectorAll('[data-testid="loading-error-message"]'));
+      const hasPleaseWait = loaders.some(el => {
+        const txt = el.textContent || '';
+        // Only block on loaders for Overview, Patient, Billing, and Line Items
+        return txt.includes('Please wait while') && 
+          (txt.includes('Overview') || txt.includes('Patient') || txt.includes('Billing') || txt.includes('details and line items'));
+      });
+      
+      const hasSpinners = !!document.querySelector('[data-testid="bs-loading"], [data-testid="cs-loading"]');
+      
+      return !!(claimNum && patientName) && !hasPleaseWait && !hasSpinners;
+    }, { timeout: 15_000 });
+    await log('  ✅  All core card-level loaders and spinners have cleared.');
+  } catch (err) {
+    await log(`  ⚠️  Timeout/Error waiting for card-level loaders to clear: ${err}`);
+  }
+
+  // Also verify that we have at least some populated content elements (not just empty templates)
+  try {
+    const dataLocator = page.locator('[data-testid="overview-claim-number"], [data-testid="cs-claim-number"], [data-testid="pi-patient-name-content"]');
+    await dataLocator.first().waitFor({ state: 'visible', timeout: 5_000 });
+  } catch (err) {
+    await log(`  ⚠️  Timeout waiting for claim detail content elements to render: ${err}`);
+  }
+  
+  await page.waitForTimeout(1_000); // extra settle time for accordion states
+  await log('  ✅  Detail page loading checks completed.');
+}
+
+// ── Expand all closed accordion panels ─────────────────────────────────────────
+async function expandAllAccordions(page: Page, log: (msg: string) => Promise<void>) {
+  try {
+    const items = await page.locator('[data-testid$="-accordion-item"]').all();
+    for (const item of items) {
+      const state = await item.getAttribute('data-state');
+      if (state === 'closed') {
+        const testid = await item.getAttribute('data-testid');
+        const headerTestid = testid?.replace('-abyss-accordion-item', '-header-abyss-accordion-header');
+        if (headerTestid) {
+          await log(`  📂  Expanding accordion: ${testid}...`);
+          await page.locator(`[data-testid="${headerTestid}"]`).click({ force: true });
+          await page.waitForTimeout(300);
+        }
+      }
+    }
+  } catch (err) {
+    await log(`  ⚠️  Error expanding accordions: ${err}`);
+  }
+}
+
+// ── Scrape details using testids ──────────────────────────────────────────────
+async function scrapeClaimSummaryPage(page: Page): Promise<Record<string, string>> {
+  return await page.evaluate(() => {
+    const data: Record<string, string> = {};
+    const testIds = [
+      'overview-claim-number',
+      'overview-status',
+      'overview-patient-name',
+      'overview-member-id',
+      'overview-first-dos',
+      'overview-total-billed',
+      'overview-network-status',
+      'overview-adjudication-status',
+      'overview-pan',
+      'bs-billed-content',
+      'bs-total-paid-content',
+      'bs-patient-content',
+      'bs-adjustment-content',
+      'cs-claim-number',
+      'cs-first-service-date',
+      'cs-network-status',
+      'cs-fee-for-service',
+      'pi-subscriber-content',
+      'pi-patient-name-content',
+      'pi-dob-content',
+      'pi-member-id-content',
+      'pi-policy-number-content',
+      'pi-insurance-type',
+      'pi-billing-provider',
+      'pi-tax-id',
+      'cob-insurance-type',
+      'cob-policy',
+      'cob-payer',
+      'cob-payment-type',
+      'cob-paid-amount',
+      'drg-content',
+      'diagnosis-codes-content'
+    ];
+
+    testIds.forEach(id => {
+      const el = document.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+      if (el) {
+        const text = el.innerText ? el.innerText.trim() : '';
+        if (text) data[id] = text;
+      }
+    });
+
+    const lineRows = document.querySelectorAll('[data-testid="data-table-row"]');
+    const lines: string[] = [];
+    lineRows.forEach((row, idx) => {
+      const cells = Array.from(row.querySelectorAll('td, th, .abyss-table-cell'));
+      const cellTexts = cells.map(c => (c.textContent || '').trim().replace(/\s+/g, ' ')).filter(Boolean);
+      
+      const expandedCarc = row.querySelector('[data-testid="expanded-row-carc-codes-text"]') as HTMLElement | null;
+      const expandedRemark = row.querySelector('[data-testid="expanded-row-remark-codes-text"]') as HTMLElement | null;
+      const expandedRemit = row.querySelector('[data-testid="expanded-row-remittance-codes-text"]') as HTMLElement | null;
+      
+      let lineStr = `Line ${idx + 1}: ${cellTexts.join(' | ')}`;
+      const extra: string[] = [];
+      if (expandedCarc && expandedCarc.innerText.trim()) {
+        extra.push(`CARC: ${expandedCarc.innerText.trim()}`);
+      }
+      if (expandedRemark && expandedRemark.innerText.trim()) {
+        extra.push(`Remark: ${expandedRemark.innerText.trim()}`);
+      }
+      if (expandedRemit && expandedRemit.innerText.trim()) {
+        extra.push(`Remittance: ${expandedRemit.innerText.trim()}`);
+      }
+      if (extra.length > 0) {
+        lineStr += ` (${extra.join('; ')})`;
+      }
+      lines.push(lineStr);
+    });
+
+    if (lines.length > 0) {
+      data['line-items'] = lines.join('\n');
+    }
+
+    return data;
+  });
+}
+
+// ── Format the scraped details into a clean text blob ──────────────────────────
+function formatScrapedDataBlob(data: Record<string, string>): string {
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(data)) {
+    if (key === 'line-items') continue;
+    const lines = value.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length === 1) {
+      const humanLabel = key.replace(/^(overview|bs|cs|pi|cob)-/, '').replace(/-/g, ' ');
+      parts.push(`${humanLabel}: ${lines[0]}`);
+    } else if (lines.length >= 2) {
+      parts.push(`${lines[0]}: ${lines.slice(1).join(' ')}`);
+    }
+  }
+  if (data['line-items']) {
+    parts.push('\n--- Line Items ---');
+    parts.push(data['line-items']);
+  }
+  return parts.join('\n');
+}
+
+// ── Extract label-value pair values safely ──────────────────────────────────────
+function extractValueFromContent(content: string | undefined): string {
+  if (!content) return '';
+  const lines = content.split('\n').map(l => l.trim()).filter(Boolean);
+  return lines.length >= 2 ? lines[1] : lines[0] || '';
+}
+
+// ── Return back to the search results screen from a summary page ──────────────
+async function goBackToResults(page: Page, claim: ClaimRow, sendEvent: SendEvent) {
+  const log = (msg: string) => sendEvent({ type: 'log', message: msg });
+  try {
+    const backBtn = page.locator('[data-testid="header-back-button-abyss-button-root"]');
+    if (await backBtn.count() > 0 && await backBtn.isVisible()) {
+      await log('  🖱️  Clicking header back button to return to search results...');
+      await backBtn.click();
+      await waitForOverlayLoader(page, log);
+      await page.waitForSelector(SEL.ALL_CLAIM_LINKS, { timeout: 10_000 });
+      return;
+    }
+  } catch (err) {
+    await log(`  ⚠️  Header back button failed or timed out: ${err}. Trying browser goBack...`);
+  }
+
+  try {
+    await page.goBack();
+    await waitForOverlayLoader(page, log);
+    await page.waitForSelector(SEL.ALL_CLAIM_LINKS, { timeout: 10_000 });
+    return;
+  } catch (err) {
+    await log(`  ⚠️  Browser goBack failed: ${err}. Re-running search...`);
+  }
+
+  await searchClaim(page, claim, sendEvent);
+  await waitForOverlayLoader(page, log);
+  await page.waitForSelector(SEL.ALL_CLAIM_LINKS, { timeout: 15_000 });
+}
+
+// ── Find matching claims in results ─────────────────────────────────────────────
 async function findMatchingClaim(
   page: Page,
   claim: ClaimRow,
   targetDate: string,
+  attempt: number,
   sendEvent: SendEvent
-): Promise<{ href: string; payload: Record<string, string> } | { popupError: string } | null> {
+): Promise<Partial<BotFields> | { popupError: string } | null> {
   const log = (msg: string) => sendEvent({ type: 'log', message: msg });
   const MAX_ATTEMPTS = 2;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    if (attempt > 1) {
-      await log(`  🔄  Retrying search after popup (attempt ${attempt}/${MAX_ATTEMPTS})...`);
+  for (let searchAttempt = 1; searchAttempt <= MAX_ATTEMPTS; searchAttempt++) {
+    if (searchAttempt > 1) {
+      await log(`  🔄  Retrying search after popup (attempt ${searchAttempt}/${MAX_ATTEMPTS})...`);
       await searchClaim(page, claim, sendEvent);
     }
 
-    // Wait for results, "no results" banner, OR the popup close button
+    // Wait for results, "no results" banner, OR the popup close button to appear first.
+    // We cannot wait for .abyss-loading-overlay-root to detach first, because if an error popup
+    // is displayed, the loading overlay remains visible as its container backdrop and never detaches.
     try {
       await page.waitForSelector(
         `${SEL.RESULTS_HEADING}, ${SEL.NO_RESULTS}, ${SEL.POPUP_CLOSE}`,
         { timeout: 30_000 }
       );
-    } catch {
-      await log('  ⚠️  Timed out waiting for results or popup.');
+    } catch (err) {
+      await log(`  ⚠️  Timed out waiting for results or popup: ${err}`);
       return null;
     }
 
-    // Check for popup
+    // Check for popup immediately while the loader may still be present
     const popupMessage = await dismissPopupIfPresent(page, sendEvent);
     if (popupMessage !== null) {
       const lowerMsg = popupMessage.toLowerCase();
@@ -668,129 +888,195 @@ async function findMatchingClaim(
         return { popupError: popupMessage };
       }
 
-      if (attempt < MAX_ATTEMPTS) {
+      if (searchAttempt < MAX_ATTEMPTS) {
         await log(`  🔁  Popup dismissed — will retry once.`);
         continue;
       }
-      await log(`  ❌  Popup appeared again on attempt ${attempt}. Reporting popup message as row error.`);
+      await log(`  ❌  Popup appeared again on attempt ${searchAttempt}. Reporting popup message as row error.`);
       return { popupError: popupMessage };
     }
 
-    // No popup — process results normally
+    // If no popup was present, we wait for the overlay loader to detach completely
+    await waitForOverlayLoader(page, log);
+
+    // No popup — wait for search results table contents to be fully loaded
+    try {
+      await log('  ⏳  Waiting for search results/claims table to populate...');
+      await page.waitForSelector(
+        `${SEL.ALL_CLAIM_LINKS}, ${SEL.NO_RESULTS}`,
+        { timeout: 15_000 }
+      );
+      await page.waitForTimeout(1_500); // allow final rendering to settle
+    } catch (err) {
+      await log(`  ⚠️  Timed out waiting for claim links or no-results banner to render: ${err}`);
+    }
+
     const noResults = await page.$(SEL.NO_RESULTS);
     if (noResults) {
       await log('  ℹ️  No results returned for this search.');
       return null;
     }
 
+    // ── Find matching claim links in the DOM ───────────────────────────────────
     const links = await page.locator(SEL.ALL_CLAIM_LINKS).all();
-    await log(`  📋  Found ${links.length} claim(s). Looking for date ${targetDate}...`);
+    await log(`  📋  Found ${links.length} claim(s). Scanning for target date ${targetDate}...`);
+
+    const matchingClaimIndexes: number[] = [];
+    const payloads: Record<string, string>[] = [];
+    const hrefs: string[] = [];
 
     for (let i = 0; i < links.length; i++) {
-      const href    = await links[i].getAttribute('href') ?? '';
+      const href = await links[i].getAttribute('href') ?? '';
       const payload = decodeClaimPayload(href);
       const claimDate = payload.firstServiceDate ?? '';
 
-      if (claimDate === targetDate) {
-        await log(`  ✅  Match found: Claim ${payload.claimNumber} | Status: ${payload.claimStatus} | Date: ${claimDate}`);
-        await log(`  🔗  Clicking claim link to navigate (prevents KeyTooLongError)...`);
-        await links[i].click();
+      let isMatch = (claimDate === targetDate);
+      if (!isMatch) {
         try {
-          await page.waitForURL(/\/summary\//, { timeout: 10_000 });
-          await page.waitForLoadState('networkidle', { timeout: 15_000 });
-        } catch (err) {
-          await log(`  ⚠️  Navigation wait failed: ${err}`);
+          const col5 = await page.locator(`td.abyss-table-cell-col-5-row-${i + 1}`).innerText({ timeout: 500 });
+          if (col5.trim() === targetDate) {
+            isMatch = true;
+          }
+        } catch { /* ignore */ }
+      }
+
+      if (isMatch) {
+        matchingClaimIndexes.push(i);
+        payloads.push(payload);
+        hrefs.push(href);
+        await log(`  🎯  Claim Match Found at row index ${i + 1}: Claim ${payload.claimNumber || 'Unknown'} | Status: ${payload.claimStatus || 'Unknown'}`);
+      }
+    }
+
+    if (matchingClaimIndexes.length === 0) {
+      await log(`  ⚠️  No claim matched service date ${targetDate}.`);
+      return null;
+    }
+
+    const allScrapedFields: Partial<BotFields>[] = [];
+
+    // Visit summary page for each matched claim
+    for (let m = 0; m < matchingClaimIndexes.length; m++) {
+      const idx = matchingClaimIndexes[m];
+      const p = payloads[m];
+      const href = hrefs[m];
+      await log(`  🔄  Visiting matching claim ${m + 1}/${matchingClaimIndexes.length}...`);
+
+      // Ensure we are back on results page
+      if (m > 0) {
+        await goBackToResults(page, claim, sendEvent);
+      }
+
+      // Freshly locate the link using its href (most robust against DOM re-rendering) or fallback lazy nth(idx)
+      const linkLocator = page.locator(`a[href="${href}"]`);
+      
+      try {
+        if (href && (await linkLocator.count()) > 0) {
+          await log(`  🔗  Clicking claim link by href...`);
+          await linkLocator.first().click();
+        } else {
+          await log(`  ⚠️  Link with href not found in DOM. Falling back to lazy nth(${idx})...`);
+          await page.locator(SEL.ALL_CLAIM_LINKS).nth(idx).click();
         }
-        return { href, payload };
+      } catch (clickErr) {
+        await log(`  ❌  Failed to click claim link: ${clickErr}`);
+        throw new Error(`Failed to navigate to claim #${m + 1} details page: ${clickErr}`);
       }
 
       try {
-        const col5 = await page.locator(`td.abyss-table-cell-col-5-row-${i + 1}`).innerText({ timeout: 1_000 });
-        if (col5.trim() === targetDate) {
-          await log(`  ✅  Match found via table col5: row ${i + 1}`);
-          await log(`  🔗  Clicking claim link to navigate (prevents KeyTooLongError)...`);
-          await links[i].click();
-          try {
-            await page.waitForURL(/\/summary\//, { timeout: 10_000 });
-            await page.waitForLoadState('networkidle', { timeout: 15_000 });
-          } catch (err) {
-            await log(`  ⚠️  Navigation wait failed: ${err}`);
-          }
-          return { href, payload };
-        }
-      } catch { /* column may not exist */ }
+        await page.waitForURL(/\/summary\//, { timeout: 15_000 });
+        await page.waitForLoadState('networkidle', { timeout: 15_000 });
+      } catch (err) {
+        await log(`  ❌  Navigation to claim details timed out: ${err}`);
+        throw new Error(`Navigation to claim details failed for claim #${m + 1}: ${err}`);
+      }
+
+      // Wait for all sub-loaders to complete
+      await waitForClaimDetailLoaders(page, log);
+
+      // Auto-expand accordions
+      await expandAllAccordions(page, log);
+
+      // Capture screenshot + HTML diagnostics
+      try {
+        const ss = await page.screenshot({ type: 'jpeg', quality: 60 });
+        await sendEvent({ type: 'error_screenshot', index: -2, rowIndex: claim.rowIndex, attempt, image: ss.toString('base64') });
+        await page.waitForTimeout(1000);
+        const html = await page.evaluate(() => document.documentElement.outerHTML);
+        await sendEvent({ type: 'debug_html', index: -2, rowIndex: claim.rowIndex, attempt, html });
+        await log(`  📥  Downloaded claim detail page screenshot and DOM HTML.`);
+      } catch (diagErr) {
+        await log(`  ⚠️  Could not capture details page diagnostics: ${diagErr}`);
+      }
+
+      // Scrape Summary Page details
+      const scrapedData = await scrapeClaimSummaryPage(page);
+
+      const fields: Partial<BotFields> = {};
+      fields.BotClaimDetails = formatScrapedDataBlob(scrapedData);
+
+      fields.BotClaimNumber = extractValueFromContent(scrapedData['overview-claim-number'] || scrapedData['cs-claim-number'] || p.claimNumber);
+      fields.BotClaimStatus = extractValueFromContent(scrapedData['overview-status'] || scrapedData['overview-adjudication-status'] || p.claimStatus);
+      fields.BotPaidAmount = extractValueFromContent(scrapedData['bs-total-paid-content'] || p.totalPaidAmount);
+      fields.BotBilledAmount = extractValueFromContent(scrapedData['bs-billed-content'] || p.totalBilledAmount);
+      fields.BotProcessedDate = extractValueFromContent(scrapedData['recieved-date'] || p.processedDate);
+
+      // Additional regex and code scrapes
+      try {
+        const allText = await page.innerText('body');
+        const checkMatch = allText.match(/(?:Check|EFT)\s*(?:Number|No\.?)[:\s]+([A-Z0-9\-]+)/i);
+        if (checkMatch) fields.BotCheckEFTNumber = checkMatch[1].trim();
+
+        const carcCodes = await page.evaluate(() => {
+          return Array.from(new Set(
+            Array.from(document.querySelectorAll('[data-testid="expanded-row-carc-codes-text"]'))
+              .map(el => el.textContent?.trim())
+              .filter(Boolean)
+          ));
+        });
+        const remarkCodes = await page.evaluate(() => {
+          return Array.from(new Set(
+            Array.from(document.querySelectorAll('[data-testid="expanded-row-remark-codes-text"]'))
+              .map(el => el.textContent?.trim())
+              .filter(Boolean)
+          ));
+        });
+        if (carcCodes.length > 0) fields.BotDenialReasonCode = carcCodes.join(', ');
+        if (remarkCodes.length > 0) fields.BotRemarkCodes = remarkCodes.join(', ');
+      } catch (err) {
+        await log(`  ⚠️  Error running element/regex scrapes: ${err}`);
+      }
+
+      allScrapedFields.push(fields);
+      await log(`  ℹ️  Scraped details for claim #${m + 1} (${fields.BotClaimNumber}): length ${fields.BotClaimDetails.length}`);
     }
 
-    await log(`  ⚠️  No claim matched service date ${targetDate}.`);
-    return null;
+    // Combine results
+    const combinedFields: Partial<BotFields> = {};
+    if (allScrapedFields.length === 1) {
+      Object.assign(combinedFields, allScrapedFields[0]);
+    } else if (allScrapedFields.length > 1) {
+      combinedFields.BotClaimNumber = allScrapedFields.map(f => f.BotClaimNumber).filter(Boolean).join(', ');
+      combinedFields.BotClaimStatus = allScrapedFields.map(f => f.BotClaimStatus).filter(Boolean).join(', ');
+      combinedFields.BotPaidAmount = allScrapedFields.map(f => f.BotPaidAmount).filter(Boolean).join(', ');
+      combinedFields.BotBilledAmount = allScrapedFields.map(f => f.BotBilledAmount).filter(Boolean).join(', ');
+      combinedFields.BotCheckEFTNumber = allScrapedFields.map(f => f.BotCheckEFTNumber).filter(Boolean).join(', ');
+      combinedFields.BotDenialReasonCode = allScrapedFields.map(f => f.BotDenialReasonCode).filter(Boolean).join(', ');
+      combinedFields.BotRemarkCodes = allScrapedFields.map(f => f.BotRemarkCodes).filter(Boolean).join(', ');
+      combinedFields.BotProcessedDate = allScrapedFields.map(f => f.BotProcessedDate).filter(Boolean).join(', ');
+
+      combinedFields.BotClaimDetails = allScrapedFields.map((f, i) => {
+        const claimNum = f.BotClaimNumber || 'Unknown';
+        return `=== Claim #${i + 1} (${claimNum}) ===\n${f.BotClaimDetails}`;
+      }).join('\n\n');
+      
+      await log(`  ℹ️  Combined BotClaimDetails for ${allScrapedFields.length} claims: length ${combinedFields.BotClaimDetails.length}`);
+    }
+
+    return combinedFields;
   }
 
   return null;
-}
-
-// ── Scrape detail page for denial/remark codes ────────────────────────────────
-async function scrapeDetailPage(
-  page: Page,
-  href: string,
-  rowIndex: number,
-  attempt: number,
-  sendEvent: SendEvent
-): Promise<Partial<BotFields>> {
-  const log = (msg: string) => sendEvent({ type: 'log', message: msg });
-  const baseUrl = process.env.UHC_URL ?? 'https://secure.uhcprovider.com';
-  const url = `${baseUrl}${href}`;
-
-  const currentUrl = page.url();
-  if (currentUrl.includes('/summary/')) {
-    await log(`  📄  Already on details page (via client-side navigation).`);
-  } else {
-    await log(`  🔗  Loading claim detail page via direct URL (fallback)...`);
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 30_000 });
-  }
-
-  // Capture details page screenshot and HTML for user inspection/scraped data confirmation
-  try {
-    const ss = await page.screenshot({ type: 'jpeg', quality: 60 });
-    await sendEvent({ 
-      type: 'error_screenshot', 
-      index: -2, 
-      rowIndex, 
-      attempt: attempt + 10, 
-      image: ss.toString('base64') 
-    });
-    const html = await page.evaluate(() => document.documentElement.outerHTML);
-    await sendEvent({ 
-      type: 'debug_html', 
-      index: -2, 
-      rowIndex, 
-      attempt: attempt + 10, 
-      html 
-    });
-    await log(`  📥  Downloaded claim detail page screenshot and DOM HTML (Attempt suffix +10).`);
-  } catch (diagErr) {
-    await log(`  ⚠️  Could not capture details page diagnostics: ${diagErr}`);
-  }
-
-  const fields: Partial<BotFields> = {};
-  try {
-    const cells = await page.locator('[role="cell"]').allInnerTexts();
-    fields.BotClaimDetails = cells.filter(t => t.trim()).join(' | ').substring(0, 5000);
-
-    const allText = await page.innerText('body');
-    const denialMatch = allText.match(/(?:Denial|Reason)\s*Code[:\s]+([A-Z0-9\-,\s]{1,50})/i);
-    if (denialMatch) fields.BotDenialReasonCode = denialMatch[1].trim();
-
-    const remarkMatch = allText.match(/Remark\s*Code[:\s]+([A-Z0-9\-,\s]{1,50})/i);
-    if (remarkMatch) fields.BotRemarkCodes = remarkMatch[1].trim();
-
-    const checkMatch = allText.match(/(?:Check|EFT)\s*(?:Number|No\.?)[:\s]+([A-Z0-9\-]+)/i);
-    if (checkMatch) fields.BotCheckEFTNumber = checkMatch[1].trim();
-
-    await log(`  📄  Detail page scraped. BotClaimDetails length: ${fields.BotClaimDetails?.length ?? 0} chars.`);
-  } catch (err) {
-    await log(`  ⚠️  Detail page scrape error: ${err}`);
-  }
-  return fields;
 }
 
 // ── Process a single row ──────────────────────────────────────────────────────
@@ -809,7 +1095,7 @@ async function processRow(
 
   try {
     await searchClaim(page, claim, sendEvent);
-    const match = await findMatchingClaim(page, claim, claim.serviceDate, sendEvent);
+    const match = await findMatchingClaim(page, claim, claim.serviceDate, attempt, sendEvent);
 
     // Popup appeared twice — surface its message as a row error
     if (match && 'popupError' in match) {
@@ -833,20 +1119,16 @@ async function processRow(
       return botFields;
     }
 
-
-    const p = match.payload;
-    const detailFields = await scrapeDetailPage(page, match.href, claim.rowIndex, attempt, sendEvent);
-
     const botFields: BotFields = {
-      BotClaimNumber:   p.claimNumber ?? '',
-      BotClaimStatus:   p.claimStatus ?? '',
-      BotPaidAmount:    p.totalPaidAmount ?? '',
-      BotBilledAmount:  p.totalBilledAmount ?? '',
-      BotProcessedDate: p.processedDate ?? '',
+      BotClaimNumber:   match.BotClaimNumber ?? '',
+      BotClaimStatus:   match.BotClaimStatus ?? '',
+      BotPaidAmount:    match.BotPaidAmount ?? '',
+      BotBilledAmount:  match.BotBilledAmount ?? '',
+      BotProcessedDate: match.BotProcessedDate ?? '',
       BotUpdateTime:    new Date().toISOString(),
       BotStatus:        'Success',
       BotStatusError:   '',
-      ...detailFields,
+      ...match,
     };
 
     await log(`  ✅  Row ${rowNum}: Success — Claim ${botFields.BotClaimNumber} | Status: ${botFields.BotClaimStatus} | Paid: ${botFields.BotPaidAmount}`);
@@ -863,6 +1145,7 @@ async function processRow(
     try {
       const ss = await page.screenshot({ type: 'jpeg', quality: 60 });
       await sendEvent({ type: 'error_screenshot', index: arrayIndex, rowIndex: claim.rowIndex, attempt, image: ss.toString('base64') });
+      await page.waitForTimeout(1000);
       const html = await page.evaluate(() => document.documentElement.outerHTML);
       await sendEvent({ type: 'debug_html', index: arrayIndex, rowIndex: claim.rowIndex, attempt, html });
     } catch (diagErr) {
@@ -873,7 +1156,6 @@ async function processRow(
       (err as any).diagnosticsCaptured = true;
     }
 
-    // If browser, context, or page is closed/destroyed, it's a terminal error
     const isTerminal = 
       msg.includes('closed') || 
       msg.includes('Protocol error') || 
@@ -886,7 +1168,6 @@ async function processRow(
       throw err;
     }
 
-    // Try to recover navigation
     try { await navigateToClaimSearch(page, sendEvent); } catch { /* ignore recovery failure */ }
 
     return {
@@ -1020,6 +1301,13 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
 
       const fields = await processRow(page, claims[i], i, i + 1, claims.length, attempt, sendEvent);
 
+      await log(`  ℹ️  Sending row_update for row ${claims[i].rowIndex}: keys=[${Object.keys(fields).join(', ')}]`);
+      if (fields.BotClaimDetails) {
+        await log(`  ℹ️  Sending BotClaimDetails: length ${fields.BotClaimDetails.length}`);
+      } else {
+        await log(`  ⚠️  Sending BotClaimDetails: EMPTY OR UNDEFINED`);
+      }
+
       await sendEvent({
         type:     'row_update',
         index:    i,           // 0-based for workbook lookup
@@ -1049,6 +1337,7 @@ export async function runAutomation(opts: AutomationOptions): Promise<void> {
         const startRowIndex = claims[startIndex]?.rowIndex ?? 2;
         const ss = await page.screenshot({ type: 'jpeg', quality: 60 });
         await sendEvent({ type: 'error_screenshot', index: -1, rowIndex: startRowIndex, attempt, image: ss.toString('base64') });
+        await page.waitForTimeout(1000);
         const html = await page.evaluate(() => document.documentElement.outerHTML);
         await sendEvent({ type: 'debug_html', index: -1, rowIndex: startRowIndex, attempt, html });
         (err as any).diagnosticsCaptured = true;

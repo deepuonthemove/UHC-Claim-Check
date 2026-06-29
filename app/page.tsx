@@ -281,7 +281,8 @@ export default function HomePage() {
                 a.href     = url;
                 const rowLabel = event.rowIndex ? `row_${event.rowIndex}` : (event.index === -1 ? 'login' : `row_${event.index + 2}`);
                 const attemptLabel = event.attempt ? `_attempt_${event.attempt}` : '';
-                a.download = `error_screenshot_${rowLabel}${attemptLabel}.jpg`;
+                const prefix = event.index === -2 ? 'claim_detail' : 'error_screenshot';
+                a.download = `${prefix}_${rowLabel}${attemptLabel}.jpg`;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
@@ -301,7 +302,8 @@ export default function HomePage() {
                   a.href     = url;
                   const rowLabel = event.rowIndex ? `row_${event.rowIndex}` : (event.index === -1 ? 'login' : `row_${event.index + 2}`);
                   const attemptLabel = event.attempt ? `_attempt_${event.attempt}` : '';
-                  a.download = `debug_dom_${rowLabel}${attemptLabel}.html`;
+                  const prefix = event.index === -2 ? 'claim_detail' : 'debug_dom';
+                  a.download = `${prefix}_${rowLabel}${attemptLabel}.html`;
                   document.body.appendChild(a);
                   a.click();
                   document.body.removeChild(a);
@@ -732,12 +734,15 @@ export default function HomePage() {
               {errorScreenshots.map((err, i) => {
                 const rowLabel = err.rowIndex ? `Excel Row ${err.rowIndex}` : err.index === -1 ? 'Login' : `Row ${err.index + 2}`;
                 const attemptLabel = err.attempt ? ` — Attempt ${err.attempt}` : '';
-                const downloadFilename = `error_screenshot_${err.rowIndex ? `row_${err.rowIndex}` : err.index === -1 ? 'login' : `row_${err.index + 2}`}${err.attempt ? `_attempt_${err.attempt}` : ''}.jpg`;
+                const isDetail = err.index === -2;
+                const typeLabel = isDetail ? 'Claim Details View' : 'Error Screenshot';
+                const filePrefix = isDetail ? 'claim_detail' : 'error_screenshot';
+                const downloadFilename = `${filePrefix}_${err.rowIndex ? `row_${err.rowIndex}` : err.index === -1 ? 'login' : `row_${err.index + 2}`}${err.attempt ? `_attempt_${err.attempt}` : ''}.jpg`;
                 
                 return (
-                  <div key={i} className="card card--error">
+                  <div key={i} className={`card ${isDetail ? 'card--success' : 'card--error'}`}>
                     <div className="card-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span>📸 {rowLabel}{attemptLabel} Error Screenshot</span>
+                      <span>📸 {rowLabel}{attemptLabel} {typeLabel}</span>
                       <a
                         href={`data:image/jpeg;base64,${err.image}`}
                         download={downloadFilename}
