@@ -9,7 +9,7 @@ import { fetchEventSource } from '@microsoft/fetch-event-source';
 const BOT_HEADERS = [
   'BotClaimNumber', 'BotClaimStatus', 'BotPaidAmount', 'BotBilledAmount',
   'BotCheckEFTNumber', 'BotDenialReasonCode', 'BotDenialDescription',
-  'BotRemarkCodes', 'BotProcessedDate', 'BotClaimDetails',
+  'BotRemarkCodes', 'BotProcessedDate', 'BotClaimDetails', 'BotClaimResult',
   'BotUpdateTime', 'BotStatus', 'BotStatusError',
 ] as const;
 

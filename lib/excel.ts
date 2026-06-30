@@ -29,6 +29,7 @@ export interface BotFields {
   BotRemarkCodes?: string;
   BotProcessedDate?: string;
   BotClaimDetails?: string;
+  BotClaimResult?: string;
   BotUpdateTime?: string;
   BotStatus: 'Success' | 'Error' | 'Skipped';
   BotStatusError?: string;
@@ -160,7 +161,7 @@ export async function ensureBotHeaders(buffer: ArrayBuffer): Promise<ArrayBuffer
   const BOT_COLUMNS: (keyof BotFields)[] = [
     'BotClaimNumber', 'BotClaimStatus', 'BotPaidAmount', 'BotBilledAmount',
     'BotCheckEFTNumber', 'BotDenialReasonCode', 'BotDenialDescription',
-    'BotRemarkCodes', 'BotProcessedDate', 'BotClaimDetails',
+    'BotRemarkCodes', 'BotProcessedDate', 'BotClaimDetails', 'BotClaimResult',
     'BotUpdateTime', 'BotStatus', 'BotStatusError',
   ];
 

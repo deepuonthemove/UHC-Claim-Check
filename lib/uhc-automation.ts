@@ -749,8 +749,68 @@ async function scrapeClaimSummaryPage(page: Page): Promise<Record<string, string
       }
     });
 
+    // ── Extract Payer Name ──
+    let payerName = 'UnitedHealthcare';
+    const payerMenu = document.querySelector('[data-testid="payer-menu-abyss-button-root"]')?.textContent?.trim();
+    if (payerMenu) {
+      const parts = payerMenu.split('-');
+      if (parts.length >= 2) {
+        payerName = parts[parts.length - 1].trim();
+      } else {
+        payerName = payerMenu;
+      }
+    }
+    data['payer-name'] = payerName;
+
+    // ── Extract Payment Info ──
+    const paymentHeaders = Array.from(document.querySelectorAll('[data-testid="data-table-header"]'));
+    let payIssueDateCol = -1;
+    let payNumCol = -1;
+    paymentHeaders.forEach((th, idx) => {
+      const id = th.querySelector('span > span')?.id || '';
+      if (id.includes('payment-issue-date')) payIssueDateCol = idx;
+      if (id.includes('payment-number')) payNumCol = idx;
+      
+      const txt = th.textContent || '';
+      if (txt.includes('Payment issue date')) payIssueDateCol = idx;
+      if (txt.includes('Payment number')) payNumCol = idx;
+    });
+
+    const issueDateHeader = document.querySelector('#payment-issue-date-label') || document.querySelector('[data-testid="payment-info"]');
+    if (issueDateHeader) {
+      const table = issueDateHeader.closest('table');
+      if (table) {
+        const bodyRow = table.querySelector('tbody tr');
+        if (bodyRow) {
+          const cells = bodyRow.querySelectorAll('td');
+          if (payIssueDateCol >= 0 && payIssueDateCol < cells.length) {
+            data['payment-issue-date'] = cells[payIssueDateCol].textContent?.trim() || '';
+          }
+          if (payNumCol >= 0 && payNumCol < cells.length) {
+            data['payment-number'] = cells[payNumCol].textContent?.trim() || '';
+          }
+        }
+      }
+    }
+
+    // Fallback: search by regex inside payments accordion container
+    const paymentsAccordion = document.querySelector('[data-testid="payments-accordion-abyss-accordion-item"]') || document.body;
+    const cardText = (paymentsAccordion as HTMLElement).innerText || '';
+    const dates = cardText.match(/\b\d{2}\/\d{2}\/\d{4}\b/g) || [];
+    const numbers = cardText.match(/\b\d{7,12}\b/g) || [];
+    
+    if (!data['payment-issue-date'] && dates.length > 0) {
+      data['payment-issue-date'] = dates[0] || '';
+    }
+    if (!data['payment-number'] && numbers.length > 0) {
+      data['payment-number'] = numbers[0] || '';
+    }
+
+    // ── Extract Line Items ──
     const lineRows = document.querySelectorAll('[data-testid="data-table-row"]');
     const lines: string[] = [];
+    const lineItemsData: any[] = [];
+
     lineRows.forEach((row, idx) => {
       const cells = Array.from(row.querySelectorAll('td, th, .abyss-table-cell'));
       const cellTexts = cells.map(c => (c.textContent || '').trim().replace(/\s+/g, ' ')).filter(Boolean);
@@ -774,11 +834,66 @@ async function scrapeClaimSummaryPage(page: Page): Promise<Record<string, string
         lineStr += ` (${extra.join('; ')})`;
       }
       lines.push(lineStr);
+
+      // Parse structured line items for BotClaimResult
+      let cptCode = '';
+      for (const cell of cellTexts) {
+        const cleaned = cell.trim();
+        if (/^\d{5}$/.test(cleaned) || /^[A-Z0-9]{5}$/i.test(cleaned)) {
+          cptCode = cleaned;
+          break;
+        }
+      }
+      if (!cptCode && cellTexts.length > 3) {
+        cptCode = cellTexts[3];
+      }
+
+      const dollarValues = cellTexts.filter(c => c.includes('$'));
+      let billedAmount = '$0.00';
+      let paidAmount = '$0.00';
+      if (dollarValues.length >= 2) {
+        billedAmount = dollarValues[dollarValues.length - 2];
+        paidAmount = dollarValues[dollarValues.length - 1];
+      } else if (dollarValues.length === 1) {
+        billedAmount = dollarValues[0];
+      }
+
+      const rowText = row.textContent || '';
+      const getAmount = (pattern: RegExp, defaultVal: string): string => {
+        const m = rowText.match(pattern);
+        return m ? m[1].trim() : defaultVal;
+      };
+
+      const allowedAmount = getAmount(/Allowed(?: Amount)?[:\s]*\$([0-9\.,]+)/i, billedAmount);
+      const deductible = getAmount(/Deductible[:\s]*\$([0-9\.,]+)/i, '$0.00');
+      const copay = getAmount(/(?:Co-pay|Copay|Copayment)[:\s]*\$([0-9\.,]+)/i, '$0.00');
+      const coinsurance = getAmount(/(?:Co-insurance|Coinsurance)[:\s]*\$([0-9\.,]+)/i, '$0.00');
+
+      let denialReason = '';
+      if (expandedCarc && expandedCarc.innerText.trim()) {
+        denialReason = expandedCarc.innerText.trim();
+      } else if (expandedRemark && expandedRemark.innerText.trim()) {
+        denialReason = expandedRemark.innerText.trim();
+      } else {
+        denialReason = 'Service denied';
+      }
+
+      lineItemsData.push({
+        cptCode,
+        billedAmount,
+        paidAmount,
+        allowedAmount: allowedAmount.startsWith('$') ? allowedAmount : `$${allowedAmount}`,
+        deductible: deductible.startsWith('$') ? deductible : `$${deductible}`,
+        copay: copay.startsWith('$') ? copay : `$${copay}`,
+        coinsurance: coinsurance.startsWith('$') ? coinsurance : `$${coinsurance}`,
+        denialReason
+      });
     });
 
     if (lines.length > 0) {
       data['line-items'] = lines.join('\n');
     }
+    data['line-items-json'] = JSON.stringify(lineItemsData);
 
     return data;
   });
@@ -788,7 +903,7 @@ async function scrapeClaimSummaryPage(page: Page): Promise<Record<string, string
 function formatScrapedDataBlob(data: Record<string, string>): string {
   const parts: string[] = [];
   for (const [key, value] of Object.entries(data)) {
-    if (key === 'line-items') continue;
+    if (key === 'line-items' || key === 'line-items-json' || key === 'payment-issue-date' || key === 'payment-number' || key === 'payer-name') continue;
     const lines = value.split('\n').map(l => l.trim()).filter(Boolean);
     if (lines.length === 1) {
       const humanLabel = key.replace(/^(overview|bs|cs|pi|cob)-/, '').replace(/-/g, ' ');
@@ -1019,7 +1134,7 @@ async function findMatchingClaim(
       fields.BotClaimStatus = extractValueFromContent(scrapedData['overview-status'] || scrapedData['overview-adjudication-status'] || p.claimStatus);
       fields.BotPaidAmount = extractValueFromContent(scrapedData['bs-total-paid-content'] || p.totalPaidAmount);
       fields.BotBilledAmount = extractValueFromContent(scrapedData['bs-billed-content'] || p.totalBilledAmount);
-      fields.BotProcessedDate = extractValueFromContent(scrapedData['recieved-date'] || p.processedDate);
+      fields.BotProcessedDate = extractValueFromContent(scrapedData['processed-date'] || scrapedData['recieved-date'] || p.processedDate);
 
       // Additional regex and code scrapes
       try {
@@ -1041,12 +1156,56 @@ async function findMatchingClaim(
               .filter(Boolean)
           ));
         });
-        if (carcCodes.length > 0) fields.BotDenialReasonCode = carcCodes.join(', ');
+        if (carcCodes.length > 0) {
+          fields.BotDenialReasonCode = carcCodes.join(', ');
+          fields.BotDenialDescription = carcCodes[0];
+        }
         if (remarkCodes.length > 0) fields.BotRemarkCodes = remarkCodes.join(', ');
       } catch (err) {
         await log(`  ⚠️  Error running element/regex scrapes: ${err}`);
       }
 
+      // Build BotClaimResult
+      let lineItems: any[] = [];
+      try {
+        if (scrapedData['line-items-json']) {
+          lineItems = JSON.parse(scrapedData['line-items-json']);
+        }
+      } catch { /* ignore */ }
+
+      const claimResultParts: string[] = [];
+      const totalPaidStr = fields.BotPaidAmount || '0.00';
+      const numericTotalPaid = parseFloat(totalPaidStr.replace(/[^0-9\.]/g, '')) || 0;
+      
+      const checkNumber = fields.BotCheckEFTNumber || scrapedData['payment-number'] || 'N/A';
+      const checkDate = scrapedData['payment-issue-date'] || fields.BotProcessedDate || 'N/A';
+      const payerName = scrapedData['payer-name'] || 'UnitedHealthcare';
+      const processedDate = fields.BotProcessedDate || 'N/A';
+      const claimNumber = fields.BotClaimNumber || 'N/A';
+      const serviceDate = claim.serviceDate;
+
+      if (numericTotalPaid > 0) {
+        claimResultParts.push(`DOS ${serviceDate} Claim processed by ${payerName} on ${processedDate} under Claim # ${claimNumber}. Payment issued via Check/EFT # ${checkNumber} dated ${checkDate}.`);
+        
+        lineItems.forEach(item => {
+          const itemPaidStr = item.paidAmount || '0.00';
+          const itemPaidVal = parseFloat(itemPaidStr.replace(/[^0-9\.]/g, '')) || 0;
+          if (itemPaidVal > 0) {
+            claimResultParts.push(`CPT ${item.cptCode}: Allowed Amount ${item.allowedAmount}, Paid Amount ${item.paidAmount}, Deductible ${item.deductible}, Copay ${item.copay}, Coinsurance ${item.coinsurance}.`);
+          } else {
+            claimResultParts.push(`CPT ${item.cptCode}: Remark code - denied for ${item.denialReason}.`);
+          }
+        });
+      } else {
+        lineItems.forEach(item => {
+          claimResultParts.push(`CPT ${item.cptCode}: Remark code - denied for ${item.denialReason}.`);
+        });
+        if (lineItems.length === 0) {
+          claimResultParts.push(`CPT N/A: Remark code - denied for ${fields.BotDenialDescription || 'Service denied'}.`);
+        }
+      }
+
+      fields.BotClaimResult = claimResultParts.join('\n');
       allScrapedFields.push(fields);
       await log(`  ℹ️  Scraped details for claim #${m + 1} (${fields.BotClaimNumber}): length ${fields.BotClaimDetails.length}`);
     }
@@ -1069,6 +1228,8 @@ async function findMatchingClaim(
         const claimNum = f.BotClaimNumber || 'Unknown';
         return `=== Claim #${i + 1} (${claimNum}) ===\n${f.BotClaimDetails}`;
       }).join('\n\n');
+
+      combinedFields.BotClaimResult = allScrapedFields.map(f => f.BotClaimResult).filter(Boolean).join('\n\n');
       
       await log(`  ℹ️  Combined BotClaimDetails for ${allScrapedFields.length} claims: length ${combinedFields.BotClaimDetails.length}`);
     }
