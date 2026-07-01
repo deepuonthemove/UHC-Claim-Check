@@ -45,6 +45,8 @@ const SEL = {
   SEARCH_OPTION:    '[role="option"]:has-text("Member ID & date of birth")',
   TIN_RADIO:        'input[name="search.tinWideSearch"][value="tin"]',
   MEMBER_ID:        'input[name="search.claim.memberId"]',
+  FIRST_NAME:       'input[name*="firstName" i], input[id*="firstName" i]',
+  LAST_NAME:        'input[name*="lastName" i], input[id*="lastName" i]',
   DOB:              'input[name="search.claim.dateOfBirth"]',
   DATE_CUSTOM:      'input[name="search.dateRange"][value="custom"]',
   FIRST_SVC_DATE:   'input[name="search.dates.firstServiceDate"]',
@@ -578,26 +580,79 @@ async function navigateToClaimSearch(page: Page, sendEvent: SendEvent) {
 }
 
 // ── Select search type ────────────────────────────────────────────────────────
-async function selectSearchType(page: Page) {
+async function selectSearchType(page: Page, useName = false) {
   await page.click(SEL.SEARCH_TYPE_BTN);
-  await page.waitForSelector(SEL.SEARCH_OPTION, { timeout: 5_000 });
-  await page.click(SEL.SEARCH_OPTION);
+  await page.waitForSelector('[role="option"]', { timeout: 5_000 });
+  if (useName) {
+    // Look for option containing "name" and "birth" / "DOB" dynamically
+    const optionLocator = page.locator('[role="option"]', {
+      hasText: /name.*birth|name.*dob/i
+    });
+    if (await optionLocator.count() > 0) {
+      await optionLocator.first().click();
+    } else {
+      // Fallback: search for any option containing "name"
+      const fallbackLocator = page.locator('[role="option"]', {
+        hasText: /name/i
+      });
+      await fallbackLocator.first().click();
+    }
+  } else {
+    await page.click(SEL.SEARCH_OPTION);
+  }
   await page.waitForTimeout(400);
 }
 
+// ── Split patient name into first and last name parts safely ─────────────────
+function getPatientNameParts(claim: ClaimRow): { firstName: string; lastName: string } {
+  const patientFirstName = (claim.patientFirstName || '').trim();
+  const patientLastName = (claim.patientLastName || '').trim();
+  const patientName = (claim.patientName || '').trim();
+  
+  let firstName = patientFirstName;
+  let lastName = patientLastName;
+  
+  if ((!firstName || !lastName) && patientName) {
+    if (patientName.includes(',')) {
+      const parts = patientName.split(',');
+      lastName = parts[0].trim();
+      const firstParts = parts[1].trim().split(/\s+/);
+      firstName = firstParts[0].trim();
+    } else {
+      const parts = patientName.split(/\s+/);
+      if (parts.length >= 2) {
+        firstName = parts[0].trim();
+        lastName = parts[parts.length - 1].trim();
+      } else {
+        firstName = patientName;
+      }
+    }
+  }
+  return { firstName, lastName };
+}
+
 // ── Fill and submit claim search form ─────────────────────────────────────────
-async function searchClaim(page: Page, claim: ClaimRow, sendEvent: SendEvent) {
+async function searchClaim(page: Page, claim: ClaimRow, searchMode: 'memberId' | 'name', sendEvent: SendEvent) {
   const log = (msg: string) => sendEvent({ type: 'log', message: msg });
 
   // Close Claims & Payments dropdown if it is open/expanded and blocking UI
   await closeNavDropdownIfOpen(page, log);
 
-  await selectSearchType(page);
+  await selectSearchType(page, searchMode === 'name');
 
   try { await page.check(SEL.TIN_RADIO, { timeout: 2_000 }); } catch { /* already set */ }
 
-  await page.fill(SEL.MEMBER_ID, '');
-  await page.fill(SEL.MEMBER_ID, claim.subscriberNo);
+  if (searchMode === 'name') {
+    const { firstName, lastName } = getPatientNameParts(claim);
+    await log(`  📝  Filling patient name: First="${firstName}" | Last="${lastName}"`);
+    await page.fill(SEL.FIRST_NAME, '');
+    await page.fill(SEL.FIRST_NAME, firstName);
+    await page.fill(SEL.LAST_NAME, '');
+    await page.fill(SEL.LAST_NAME, lastName);
+  } else {
+    await page.fill(SEL.MEMBER_ID, '');
+    await page.fill(SEL.MEMBER_ID, claim.subscriberNo);
+  }
 
   await page.fill(SEL.DOB, '');
   await page.fill(SEL.DOB, claim.patientDOB);
@@ -609,7 +664,11 @@ async function searchClaim(page: Page, claim: ClaimRow, sendEvent: SendEvent) {
   await page.fill(SEL.LAST_SVC_DATE, '');
   await page.fill(SEL.LAST_SVC_DATE, claim.serviceDate);
 
-  await log(`  🔍  Search: Subscriber=${claim.subscriberNo} | DOB=${claim.patientDOB} | Date=${claim.serviceDate}`);
+  if (searchMode === 'name') {
+    await log(`  🔍  Search: Name="${claim.patientName || ''}" | DOB=${claim.patientDOB} | Date=${claim.serviceDate}`);
+  } else {
+    await log(`  🔍  Search: Subscriber=${claim.subscriberNo} | DOB=${claim.patientDOB} | Date=${claim.serviceDate}`);
+  }
 
   try {
     await page.click(SEL.SUBMIT_BTN, { timeout: 5_000 });
@@ -927,7 +986,7 @@ function extractValueFromContent(content: string | undefined): string {
 }
 
 // ── Return back to the search results screen from a summary page ──────────────
-async function goBackToResults(page: Page, claim: ClaimRow, sendEvent: SendEvent) {
+async function goBackToResults(page: Page, claim: ClaimRow, searchMode: 'memberId' | 'name', sendEvent: SendEvent) {
   const log = (msg: string) => sendEvent({ type: 'log', message: msg });
   try {
     const backBtn = page.locator('[data-testid="header-back-button-abyss-button-root"]');
@@ -951,7 +1010,7 @@ async function goBackToResults(page: Page, claim: ClaimRow, sendEvent: SendEvent
     await log(`  ⚠️  Browser goBack failed: ${err}. Re-running search...`);
   }
 
-  await searchClaim(page, claim, sendEvent);
+  await searchClaim(page, claim, searchMode, sendEvent);
   await waitForOverlayLoader(page, log);
   await page.waitForSelector(SEL.ALL_CLAIM_LINKS, { timeout: 15_000 });
 }
@@ -961,6 +1020,7 @@ async function findMatchingClaim(
   page: Page,
   claim: ClaimRow,
   targetDate: string,
+  searchMode: 'memberId' | 'name',
   attempt: number,
   sendEvent: SendEvent
 ): Promise<Partial<BotFields> | { popupError: string } | null> {
@@ -970,7 +1030,7 @@ async function findMatchingClaim(
   for (let searchAttempt = 1; searchAttempt <= MAX_ATTEMPTS; searchAttempt++) {
     if (searchAttempt > 1) {
       await log(`  🔄  Retrying search after popup (attempt ${searchAttempt}/${MAX_ATTEMPTS})...`);
-      await searchClaim(page, claim, sendEvent);
+      await searchClaim(page, claim, searchMode, sendEvent);
     }
 
     // Wait for results, "no results" banner, OR the popup close button to appear first.
@@ -1079,7 +1139,7 @@ async function findMatchingClaim(
 
       // Ensure we are back on results page
       if (m > 0) {
-        await goBackToResults(page, claim, sendEvent);
+        await goBackToResults(page, claim, searchMode, sendEvent);
       }
 
       // Freshly locate the link using its href (most robust against DOM re-rendering) or fallback lazy nth(idx)
@@ -1255,8 +1315,39 @@ async function processRow(
   await log(`\n📄 Row ${rowNum}/${total} — Subscriber: ${claim.subscriberNo} | DOB: ${claim.patientDOB} | Date: ${claim.serviceDate}`);
 
   try {
-    await searchClaim(page, claim, sendEvent);
-    const match = await findMatchingClaim(page, claim, claim.serviceDate, attempt, sendEvent);
+    let searchMode: 'memberId' | 'name' = 'memberId';
+    await searchClaim(page, claim, searchMode, sendEvent);
+    let match = await findMatchingClaim(page, claim, claim.serviceDate, searchMode, attempt, sendEvent);
+
+    // Check if we should retry using patient name & DOB
+    const isMemberNotFoundPopup = match && 'popupError' in match && 
+      (match.popupError.toLowerCase().includes('member not found') || 
+       match.popupError.toLowerCase().includes('not found') ||
+       match.popupError.toLowerCase().includes('check the data entered'));
+    
+    const noClaimMatched = !match;
+
+    if (isMemberNotFoundPopup || noClaimMatched) {
+      const nameParts = getPatientNameParts(claim);
+      const hasName = !!(nameParts.firstName || nameParts.lastName);
+
+      if (hasName) {
+        await log(`  🔄  No claim found using Member ID. Retrying using Patient Name & DOB...`);
+        searchMode = 'name';
+        
+        // Clean navigation transition
+        if (noClaimMatched) {
+          await navigateToClaimSearch(page, sendEvent);
+        } else if (match && 'popupError' in match) {
+          await navigateToClaimSearch(page, sendEvent);
+        }
+
+        await searchClaim(page, claim, searchMode, sendEvent);
+        match = await findMatchingClaim(page, claim, claim.serviceDate, searchMode, attempt, sendEvent);
+      } else {
+        await log(`  ℹ️  No claim found using Member ID. Patient Name column is empty/missing, skipping name search retry.`);
+      }
+    }
 
     // Popup appeared twice — surface its message as a row error
     if (match && 'popupError' in match) {
@@ -1273,7 +1364,7 @@ async function processRow(
     if (!match) {
       const botFields: BotFields = {
         BotStatus:      'Skipped',
-        BotStatusError: `No claim found for Subscriber ${claim.subscriberNo} on ${claim.serviceDate}`,
+        BotStatusError: `No claim found for Subscriber ${claim.subscriberNo} / Name ${claim.patientName || ''} on ${claim.serviceDate}`,
         BotUpdateTime:  new Date().toISOString(),
       };
       await log(`  ⏭️  Row ${rowNum}: Skipped — no match.`);

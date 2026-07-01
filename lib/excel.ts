@@ -15,6 +15,9 @@ export interface ClaimRow {
   subscriberNo: string;
   patientDOB: string;    // MM/DD/YYYY
   serviceDate: string;   // MM/DD/YYYY
+  patientName?: string;
+  patientFirstName?: string;
+  patientLastName?: string;
   [key: string]: unknown;
 }
 
@@ -128,6 +131,9 @@ export async function readClaimsExcel(buffer: ArrayBuffer): Promise<ClaimRow[]> 
   const subNoCol   = findCol(headerRow, 'subscriber no', 'subscriber number', 'member id', 'memberid');
   const dobCol     = findCol(headerRow, 'patient dob', 'dob', 'date of birth', 'birth');
   const svcDateCol = findCol(headerRow, 'service date', 'dos', 'date of service');
+  const nameCol    = findCol(headerRow, 'patient name', 'subscriber name', 'name', 'member name');
+  const firstCol   = findCol(headerRow, 'first name', 'patient first name', 'subscriber first name');
+  const lastCol    = findCol(headerRow, 'last name', 'patient last name', 'subscriber last name');
 
   if (subNoCol < 0 || dobCol < 0 || svcDateCol < 0) {
     throw new Error(
@@ -148,6 +154,9 @@ export async function readClaimsExcel(buffer: ArrayBuffer): Promise<ClaimRow[]> 
       subscriberNo,
       patientDOB:  getCellText(row.getCell(dobCol))  || normalizeDate(row.getCell(dobCol).value),
       serviceDate: getCellText(row.getCell(svcDateCol)) || normalizeDate(row.getCell(svcDateCol).value),
+      patientName: nameCol > 0 ? getCellText(row.getCell(nameCol)) : undefined,
+      patientFirstName: firstCol > 0 ? getCellText(row.getCell(firstCol)) : undefined,
+      patientLastName: lastCol > 0 ? getCellText(row.getCell(lastCol)) : undefined,
     });
   });
   return rows;
