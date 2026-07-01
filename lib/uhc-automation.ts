@@ -605,70 +605,44 @@ async function selectSearchType(page: Page, useName = false) {
 
 // ── Split patient name into first and last name parts safely ─────────────────
 function getPatientNameParts(claim: ClaimRow): { firstName: string; lastName: string } {
-  // Helper to find any key in object that matches a case-insensitive name
-  const getValue = (keys: string[]): string => {
-    for (const key of keys) {
-      // Direct property check
-      if (claim[key] !== undefined && claim[key] !== null) {
-        return String(claim[key]).trim();
-      }
-      // Case-insensitive, space-insensitive search of claim keys
-      const lowerKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
-      for (const claimKey of Object.keys(claim)) {
-        const lowerClaimKey = claimKey.toLowerCase().replace(/[^a-z0-9]/g, '');
-        
-        // Exclude common unrelated columns to prevent false matches (like First Service Date matching 'first')
-        const isExcluded = 
-          lowerClaimKey.includes('date') ||
-          lowerClaimKey.includes('service') ||
-          lowerClaimKey.includes('dos') ||
-          lowerClaimKey.includes('no') ||
-          lowerClaimKey.includes('num') ||
-          lowerClaimKey.includes('id') ||
-          lowerClaimKey.includes('status') ||
-          lowerClaimKey.includes('paid') ||
-          lowerClaimKey.includes('billed') ||
-          lowerClaimKey.includes('amt') ||
-          lowerClaimKey.includes('amount') ||
-          lowerClaimKey.includes('code') ||
-          lowerClaimKey.includes('reason') ||
-          lowerClaimKey.includes('remark') ||
-          lowerClaimKey.includes('update') ||
-          lowerClaimKey.includes('time');
-
-        if (isExcluded) continue;
-
-        if (lowerClaimKey === lowerKey || lowerClaimKey.includes(lowerKey)) {
-          return String(claim[claimKey]).trim();
-        }
-      }
+  // Specifically locate the "Patient Name" column value (case-insensitive, space-insensitive)
+  let patientName = '';
+  for (const key of Object.keys(claim)) {
+    const cleanKey = key.trim().toLowerCase().replace(/\s+/g, ' ');
+    if (cleanKey === 'patient name') {
+      patientName = String(claim[key] ?? '').trim();
+      break;
     }
-    return '';
-  };
+  }
 
-  const patientFirstName = getValue(['patientFirstName', 'firstName', 'patient first name', 'subscriber first name', 'first']);
-  const patientLastName = getValue(['patientLastName', 'lastName', 'patient last name', 'subscriber last name', 'last']);
-  const patientName = getValue(['patientName', 'name', 'patient name', 'subscriber name', 'member name', 'patient']);
-  
-  let firstName = patientFirstName;
-  let lastName = patientLastName;
-  
-  if ((!firstName || !lastName) && patientName) {
+  // Case-insensitive property fallbacks
+  if (!patientName) {
+    patientName = String(claim['Patient Name'] || claim['patientName'] || claim['patientname'] || '').trim();
+  }
+
+  let firstName = '';
+  let lastName = '';
+
+  if (patientName) {
     if (patientName.includes(',')) {
       const parts = patientName.split(',');
       lastName = parts[0].trim();
+      // Split first name by space to handle middle initials (e.g. "Mark K" -> "Mark")
       const firstParts = parts[1].trim().split(/\s+/);
       firstName = firstParts[0].trim();
     } else {
+      // Safe fallback if the comma is omitted
       const parts = patientName.split(/\s+/);
       if (parts.length >= 2) {
         firstName = parts[0].trim();
         lastName = parts[parts.length - 1].trim();
       } else {
         firstName = patientName;
+        lastName = patientName;
       }
     }
   }
+
   return { firstName, lastName };
 }
 
