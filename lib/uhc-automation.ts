@@ -616,10 +616,29 @@ function getPatientNameParts(claim: ClaimRow): { firstName: string; lastName: st
       const lowerKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
       for (const claimKey of Object.keys(claim)) {
         const lowerClaimKey = claimKey.toLowerCase().replace(/[^a-z0-9]/g, '');
+        
+        // Exclude common unrelated columns to prevent false matches (like First Service Date matching 'first')
+        const isExcluded = 
+          lowerClaimKey.includes('date') ||
+          lowerClaimKey.includes('service') ||
+          lowerClaimKey.includes('dos') ||
+          lowerClaimKey.includes('no') ||
+          lowerClaimKey.includes('num') ||
+          lowerClaimKey.includes('id') ||
+          lowerClaimKey.includes('status') ||
+          lowerClaimKey.includes('paid') ||
+          lowerClaimKey.includes('billed') ||
+          lowerClaimKey.includes('amt') ||
+          lowerClaimKey.includes('amount') ||
+          lowerClaimKey.includes('code') ||
+          lowerClaimKey.includes('reason') ||
+          lowerClaimKey.includes('remark') ||
+          lowerClaimKey.includes('update') ||
+          lowerClaimKey.includes('time');
+
+        if (isExcluded) continue;
+
         if (lowerClaimKey === lowerKey || lowerClaimKey.includes(lowerKey)) {
-          // Double check to make sure we don't accidentally match memberId / subscriberNo for first/last name
-          if (lowerKey === 'firstname' && (lowerClaimKey.includes('id') || lowerClaimKey.includes('no'))) continue;
-          if (lowerKey === 'lastname' && (lowerClaimKey.includes('id') || lowerClaimKey.includes('no'))) continue;
           return String(claim[claimKey]).trim();
         }
       }
