@@ -605,9 +605,31 @@ async function selectSearchType(page: Page, useName = false) {
 
 // ── Split patient name into first and last name parts safely ─────────────────
 function getPatientNameParts(claim: ClaimRow): { firstName: string; lastName: string } {
-  const patientFirstName = (claim.patientFirstName || '').trim();
-  const patientLastName = (claim.patientLastName || '').trim();
-  const patientName = (claim.patientName || '').trim();
+  // Helper to find any key in object that matches a case-insensitive name
+  const getValue = (keys: string[]): string => {
+    for (const key of keys) {
+      // Direct property check
+      if (claim[key] !== undefined && claim[key] !== null) {
+        return String(claim[key]).trim();
+      }
+      // Case-insensitive, space-insensitive search of claim keys
+      const lowerKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+      for (const claimKey of Object.keys(claim)) {
+        const lowerClaimKey = claimKey.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (lowerClaimKey === lowerKey || lowerClaimKey.includes(lowerKey)) {
+          // Double check to make sure we don't accidentally match memberId / subscriberNo for first/last name
+          if (lowerKey === 'firstname' && (lowerClaimKey.includes('id') || lowerClaimKey.includes('no'))) continue;
+          if (lowerKey === 'lastname' && (lowerClaimKey.includes('id') || lowerClaimKey.includes('no'))) continue;
+          return String(claim[claimKey]).trim();
+        }
+      }
+    }
+    return '';
+  };
+
+  const patientFirstName = getValue(['patientFirstName', 'firstName', 'patient first name', 'subscriber first name', 'first']);
+  const patientLastName = getValue(['patientLastName', 'lastName', 'patient last name', 'subscriber last name', 'last']);
+  const patientName = getValue(['patientName', 'name', 'patient name', 'subscriber name', 'member name', 'patient']);
   
   let firstName = patientFirstName;
   let lastName = patientLastName;
